@@ -1,0 +1,22 @@
+{
+  "name": "audio-bot",
+  "version": "1.0.0",
+  "description": "Telegram audio bot with playlist API, queue/player endpoints and a web playlist page",
+  "main": "index_2_1.js",
+  "private": true,
+  "scripts": {
+    "start": "node index_2_1.js",
+    "dev": "node --watch index_2_1.js"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "mongodb": "^6.10.0",
+    "music-metadata": "^11.0.0",
+    "telegraf": "^4.16.3"
+  }
+}
