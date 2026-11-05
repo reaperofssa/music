@@ -162,6 +162,21 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
 .pre button{height:58px;border-radius:10px;border:1px solid var(--s3);font-size:11px;font-weight:700;display:flex;align-items:flex-end;padding:6px 8px;text-align:left;text-shadow:0 1px 3px rgba(0,0,0,.45)}
 .pre button:hover{border-color:#fff}
 .rall{display:flex;justify-content:center;padding:6px 0 18px}
+
+/* drag handles + sortable lists */
+.r.g{grid-template-columns:22px 26px 36px minmax(0,1fr) auto;gap:8px}
+.r.g .ib{width:30px}
+.grip{width:22px;height:34px;display:grid;place-items:center;color:var(--dim);font-size:18px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;border-radius:6px}
+.grip:hover{color:#fff;background:var(--s3)}
+.grip.off{opacity:.2;cursor:default;pointer-events:none}
+.r.drag,.ro.drag{position:relative;z-index:30;background:var(--s3);box-shadow:0 8px 24px rgba(0,0,0,.55);cursor:grabbing;transition:none}
+.r.dropb,.ro.dropb{box-shadow:inset 0 2px 0 #fff}
+.r.dropa,.ro.dropa{box-shadow:inset 0 -2px 0 #fff}
+.ro{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:10px;align-items:center;padding:6px 8px;border-radius:6px;min-height:46px}
+.ro:hover{background:var(--s2)}
+.ro .nm{font-weight:600;font-size:14px}
+.ro small{color:var(--mut);font-size:12px}
+.rolist{margin:8px -4px 4px;max-height:56svh;overflow:auto}
 </style>
 </head>
 <body>
@@ -189,7 +204,7 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
 
   <section id="look" hidden>
     <div class="lk">
-      <div class="pvc"><div class="pvh"><span>Live preview · this is your real page</span><a class="pill" id="pvOpen" href="/" target="_blank">Open</a></div><iframe class="pvf" id="pv" title="Playlist preview"></iframe></div>
+      <div class="pvc"><div class="pvh"><span>Live preview · this is your real page</span></div><iframe class="pvf" id="pv" title="Playlist preview"></iframe></div>
       <div class="ctl" id="ctl"></div>
     </div>
   </section>
@@ -202,10 +217,11 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
 (() => {
   const $ = id => document.getElementById(id);
   const S = { me: null, user: null, caps: [], scope: 'all', songs: [], q: '', artist: '', genre: '', page: 0, pages: 1, total: 0, ver: 0, pending: null, ac: null, failed: false,
-    sel: new Set(), tab: 'songs', facets: null, theme: {}, allCount: 0 };
+    sel: new Set(), tab: 'songs', facets: null, theme: {}, allCount: 0, list: [], drag: false, dirty: false };
   const UP = '<svg viewBox="0 0 24 24"><path d="M12 6l7 7-1.4 1.4L13 9.8V19h-2V9.8l-4.6 4.6L5 13z"/></svg>';
   const DN = '<svg viewBox="0 0 24 24"><path d="M12 18l-7-7 1.4-1.4L11 14.2V5h2v9.2l4.6-4.6L19 11z"/></svg>';
   const RM = '<svg viewBox="0 0 24 24"><path d="M6.4 5L12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg>';
+  const GRIP = '<svg viewBox="0 0 24 24"><circle cx="7" cy="6" r="1.6"/><circle cx="12" cy="6" r="1.6"/><circle cx="17" cy="6" r="1.6"/><circle cx="7" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="17" cy="12" r="1.6"/><circle cx="7" cy="18" r="1.6"/><circle cx="12" cy="18" r="1.6"/><circle cx="17" cy="18" r="1.6"/></svg>';
   const SYNC = '<svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6a6 6 0 016 6c0 1-.25 1.97-.7 2.8l1.46 1.46A8 8 0 0012 4zm0 14a6 6 0 01-6-6c0-1 .25-1.97.7-2.8L5.24 7.74A8 8 0 0012 20v3l4-4-4-4v3z"/></svg>';
   const SEARCH = '<svg viewBox="0 0 24 24"><path d="M10 3a7 7 0 015.5 11.3l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1110 3zm0 2a5 5 0 100 10 5 5 0 000-10z"/></svg>';
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -262,14 +278,16 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
   const isGenreCap = () => !!(curCap() && curCap().genre);
   const total = () => S.user ? S.user.song_count || 0 : 0;
   async function loadCaps() {
-    const d = await getJson(`/playlist/${S.me}/capsules`); S.user = d.user; S.caps = d.capsules.filter(c => c.id !== 'all');
+    const d = await getJson(`/playlist/${S.me}/capsules`); S.user = d.user; S.list = d.capsules; S.caps = d.capsules.filter(c => c.id !== 'all');
     S.allCount = d.capsules[0] ? d.capsules[0].count : total();
   }
   function renderChips() {
     const cur = S.scope;
-    $('chips').innerHTML = `<button class="chip${cur === 'all' ? ' on' : ''}" data-s="all">All<small class="num">${S.allCount}</small></button>` +
-      S.caps.map(c => `<button class="chip${cur === c.id ? ' on' : ''}" data-s="${esc(c.id)}">${c.genre ? SYNC : ''}${esc(c.name)}<small class="num">${c.count}</small></button>`).join('') +
-      '<button class="chip add" data-s="+">+ New capsule</button>';
+    const order = S.list.length ? S.list : [{ id: 'all', name: 'All', count: S.allCount }, ...S.caps];
+    $('chips').innerHTML = order.map(c => c.id === 'all'
+      ? `<button class="chip${cur === 'all' ? ' on' : ''}" data-s="all">All<small class="num">${S.allCount}</small></button>`
+      : `<button class="chip${cur === c.id ? ' on' : ''}" data-s="${esc(c.id)}">${c.genre ? SYNC : ''}${esc(c.name)}<small class="num">${c.count}</small></button>`).join('') +
+      '<button class="chip add" data-s="+">+ New capsule</button>' + (S.caps.length ? '<button class="chip add" data-s="~">Reorder</button>' : '');
     $('capTools').hidden = cur === 'all';
     const c = curCap(), n = S.user ? name(S.user) : '';
     $('title').textContent = cur === 'all' ? 'All songs' : (c || {}).name || '';
@@ -295,8 +313,61 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
   $('chips').addEventListener('click', guard(async e => {
     const b = e.target.closest('[data-s]'); if (!b) return;
     if (b.dataset.s === '+') return newCapsuleMenu();
+    if (b.dataset.s === '~') return reorderMenu();
     select(b.dataset.s);
   }));
+
+  // ---- drag to reorder: grab the dots, drop where it should go (works with touch and mouse) ----
+  function sortable(box, { item, handle, scroller, onStart, onEnd, onDrop }) {
+    box.addEventListener('pointerdown', e => {
+      const h = e.target.closest(handle); if (!h || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      const el = h.closest(item); if (!el || !box.contains(el)) return;
+      e.preventDefault();
+      const pos = () => scroller ? scroller.scrollTop : scrollY, s0 = pos(), y0 = e.clientY;
+      const from = [...box.querySelectorAll(item)].indexOf(el);
+      let py = e.clientY, to = from, raf = 0;
+      const clear = () => box.querySelectorAll('.dropb,.dropa').forEach(x => x.classList.remove('dropb', 'dropa'));
+      const place = () => {
+        el.style.transform = `translateY(${py - y0 + pos() - s0}px)`;
+        const others = [...box.querySelectorAll(item)].filter(x => x !== el);
+        let n = 0; for (const o of others) { const r = o.getBoundingClientRect(); if (r.top + r.height / 2 < py) n++; else break; }
+        clear(); if (others.length) others[Math.min(n, others.length - 1)].classList.add(n < others.length ? 'dropb' : 'dropa');
+        to = n;
+      };
+      const tick = () => {   // edge auto-scroll while dragging (keeps clear of the sticky bars on the page)
+        const r = scroller ? scroller.getBoundingClientRect() : { top: 96, bottom: innerHeight - 96 };
+        const z = 56, d = py < r.top + z ? -Math.min(18, (r.top + z - py) / 3) : py > r.bottom - z ? Math.min(18, (py - (r.bottom - z)) / 3) : 0;
+        if (d) { scroller ? (scroller.scrollTop += d) : scrollBy(0, d); place(); }
+        raf = requestAnimationFrame(tick);
+      };
+      const mv = ev => { py = ev.clientY; place(); };
+      const end = ev => {
+        cancelAnimationFrame(raf); clear();
+        h.removeEventListener('pointermove', mv); h.removeEventListener('pointerup', end); h.removeEventListener('pointercancel', end);
+        try { h.releasePointerCapture(e.pointerId); } catch {}
+        el.classList.remove('drag'); el.style.transform = '';
+        onEnd && onEnd();
+        if (ev.type === 'pointerup' && to !== from) onDrop(from, to);
+      };
+      el.classList.add('drag'); onStart && onStart();
+      try { h.setPointerCapture(e.pointerId); } catch {}
+      h.addEventListener('pointermove', mv); h.addEventListener('pointerup', end); h.addEventListener('pointercancel', end);
+      place(); raf = requestAnimationFrame(tick);
+    });
+  }
+
+  // capsule order: the top one is shown first on your page ("All" can be moved too)
+  function reorderMenu() {
+    const items = (S.list.length ? S.list : [{ id: 'all', name: 'All', count: S.allCount }, ...S.caps]).map(c => ({ id: c.id, name: c.name, count: c.count }));
+    const draw = () => { $('ro').innerHTML = items.map((c, i) => `<div class="ro" data-id="${esc(c.id)}"><span class="grip" aria-label="Drag to reorder">${GRIP}</span><span class="nm ell">${esc(c.name)}</span><small class="num">${i === 0 ? 'Shown first' : c.count}</small></div>`).join(''); };
+    showBox('<h3 class="bt">Order capsules</h3><p class="a">Drag the dots. The one on top is shown first on your page.</p><div class="rolist" id="ro"></div><div class="btns"><button class="b pri" id="roDone">Done</button></div>');
+    draw(); $('roDone').onclick = hideBox;
+    sortable($('ro'), { item: '.ro', handle: '.grip', scroller: $('ro'), onDrop: async (from, to) => {
+      const [m] = items.splice(from, 1); items.splice(to, 0, m); draw();
+      try { await api('PUT', '/me/capsules/order', { order: items.map(c => c.id) }); await loadCaps(); renderChips(); }
+      catch (err) { toast(err.message); await loadCaps().catch(() => {}); renderChips(); }
+    } });
+  }
 
   function newCapsuleMenu() {
     showBox(`<h3 class="bt">New capsule</h3>
@@ -343,7 +414,7 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
       if (!S.songs.length) $('rows').innerHTML = `<div class="state">${esc(e.message)}</div>`; else $('more').textContent = 'Could not load more. Tap to retry'; });
     return S.pending;
   }
-  const maybeMore = () => { if (S.tab === 'songs' && !S.failed && !S.pending && S.page < S.pages && $('more').getBoundingClientRect().top < innerHeight + 500) load(); };
+  const maybeMore = () => { if (S.tab === 'songs' && !S.drag && !S.failed && !S.pending && S.page < S.pages && $('more').getBoundingClientRect().top < innerHeight + 500) load(); };
   new IntersectionObserver(es => es[0].isIntersecting && maybeMore(), { rootMargin: '500px' }).observe($('more'));
   $('more').onclick = () => { if (S.failed) { S.failed = false; load(); } };
   function select(scope) { S.scope = scope; S.q = ''; S.artist = ''; S.genre = ''; $('q').value = ''; S.sel.clear(); renderChips(); renderFilters(); renderSel(); load(true); }
@@ -387,8 +458,10 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
   });
 
   function renderRows() {
+    if (S.drag) { S.dirty = true; return; }   // never rebuild the list under a finger that is dragging
     const can = !S.q && !S.artist && !S.genre && !isGenreCap();   // custom order only makes sense in the full, unfiltered, hand-ordered list
-    $('rows').innerHTML = S.songs.length ? S.songs.map((s, i) => `<div class="r${S.sel.has(s.song_id) ? ' sel' : ''}" data-id="${esc(s.song_id)}">
+    $('rows').innerHTML = S.songs.length ? S.songs.map((s, i) => `<div class="r g${S.sel.has(s.song_id) ? ' sel' : ''}" data-id="${esc(s.song_id)}">
+      <span class="grip${can ? '' : ' off'}" aria-label="Drag to reorder">${GRIP}</span>
       <label class="ck"><input type="checkbox" data-ck ${S.sel.has(s.song_id) ? 'checked' : ''} aria-label="Select"></label>
       <span class="th">${thumb(s)}</span>
       <span style="min-width:0"><div class="t ell">${esc(s.title || 'Unknown')}</div><div class="a ell">${esc(s.artist || 'Unknown artist')}</div></span>
@@ -412,6 +485,16 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
     if (e.target.closest('[data-dn]') && i < S.songs.length - 1) return mv({ after: S.songs[i + 1].song_id }, i + 1);
     if (e.target.closest('[data-x]')) await removeSongs([id]);
   }));
+
+  sortable($('rows'), { item: '.r', handle: '.grip:not(.off)', onStart: () => { S.drag = true; },
+    onEnd: () => { S.drag = false; if (S.dirty) { S.dirty = false; renderRows(); } },
+    onDrop: guard(async (from, to) => {
+      const s = S.songs[from], rest = S.songs.filter((_, k) => k !== from);
+      if (!s || !rest.length) return;
+      const body = to < rest.length ? { before: rest[to].song_id } : { after: rest[rest.length - 1].song_id };
+      await api('PATCH', `/me/capsules/${S.scope}/songs/${s.song_id}/move`, body);
+      S.songs.splice(from, 1); S.songs.splice(to, 0, s); renderRows();
+    }) });
 
   async function removeSongs(ids) {
     const all = S.scope === 'all';
@@ -624,7 +707,7 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
   (async () => {
     if (!(await signIn())) return gate('Open this page from Telegram: send /manage to the bot in a private chat.');
     try { await Promise.all([loadCaps(), loadTheme()]); } catch (e) { return gate(e.message); }
-    $('gate').hidden = true; $('tabs').hidden = false; $('view').hidden = false; $('view').href = `/playlist/${S.me}`; $('pvOpen').href = `/playlist/${S.me}`;
+    $('gate').hidden = true; $('tabs').hidden = false; $('view').hidden = false; $('view').href = `/playlist/${S.me}`;
     buildLook(); select('all'); tab('songs');
   })();
 })();
