@@ -387,8 +387,8 @@ function startApi({ songs, users, queues }) {
     res.json({ song: shapeSong(s), listens: s.listens || 0, added_by: shapeUser(u) });
   }));
 
-  // Mini App direct link (t.me/<bot>/<app>?startapp=<user id>): the page reads the id from the start param
-  app.get('/playlist', (req, res) => res.sendFile(path.join(__dirname, 'playlist.html')));
+  // Mini App direct link (t.me/<bot>/<app>?startapp=<user id>), app URL = <BASE>/playlists: the page reads the id from the start param
+  app.get(['/playlist', '/playlists'], (req, res) => res.sendFile(path.join(__dirname, 'playlist.html')));
 
   // browsers get the playlist page, API clients (or ?format=json) get JSON
   app.get('/playlist/:userid', wrap(async (req, res) => {
