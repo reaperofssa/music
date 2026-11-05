@@ -244,6 +244,12 @@ const capFilter = (uid, c) => ({
   song_id: { $nin: c.excluded || [] },
 });
 
+// the owner's capsule order (users.cap_order = ids, "all" included); anything not listed yet (new capsules) goes last in creation order
+const orderCaps = (u, list) => {
+  const o = u.cap_order || [], at = new Map(o.map((id, i) => [id, i]));
+  return list.map((c, i) => ({ c, k: at.has(c._id) ? at.get(c._id) : o.length + i })).sort((a, b) => a.k - b.k).map(x => x.c);
+};
+
 const HEX = /^#[0-9a-f]{6}$/i;
 const THEME_ENUM = {
   mode: ['auto', 'light', 'dark'],
@@ -320,9 +326,11 @@ function startApi({ songs, users, queues }) {
   app.use(cors());
 
   const seen = new Map();
+  const pingSeen = new Map();   // ip:song -> time of the last listening-time ping
   setInterval(() => {
     const cut = Date.now() - LISTEN_WINDOW;
     for (const [k, t] of seen) if (t < cut) seen.delete(k);
+    for (const [k, t] of pingSeen) if (t < Date.now() - 15 * 60 * 1000) pingSeen.delete(k);
   }, 10 * 60 * 1000).unref();
 
   const wrap = fn => (req, res) => fn(req, res).catch(e => {
@@ -356,12 +364,31 @@ function startApi({ songs, users, queues }) {
     res.json({ counted: await countListen(req, id) });
   }));
 
+  // listening-time ping: the player reports the seconds it actually played (every ~15s and when playback stops)
+  app.post('/listen/:songid/ping', express.json(), wrap(async (req, res) => {
+    if (BOT_UA.test(req.get('user-agent') || '')) return res.json({ ok: true });
+    const id = req.params.songid;
+    let sec = Math.floor(Number(req.body?.seconds));
+    if (!Number.isFinite(sec) || sec < 1) return res.status(400).json({ error: 'seconds required' });
+    const key = `${req.ip}:${id}`, now = Date.now(), prev = pingSeen.get(key);
+    // never credit more than the wall-clock time since the last ping (plus slack), so a script can't inflate it
+    const cap = prev && now - prev < 10 * 60 * 1000 ? (now - prev) / 1000 + 5 : 40;
+    sec = Math.min(sec, 60, Math.floor(cap));
+    pingSeen.set(key, now);
+    const r = await songs.updateOne({ song_id: id, uploaded: true }, { $inc: { listen_seconds: sec } });
+    if (!r.matchedCount) return res.status(404).json({ error: 'song not found' });
+    res.json({ ok: true, credited: sec });
+  }));
+
   app.get('/info/:songid', wrap(async (req, res) => {
     const s = await songs.findOne({ song_id: req.params.songid });
     if (!s) return res.status(404).json({ error: 'song not found' });
     const u = await users.findOne({ _id: s.user_id });
     res.json({ song: shapeSong(s), listens: s.listens || 0, added_by: shapeUser(u) });
   }));
+
+  // Mini App direct link (t.me/<bot>/<app>?startapp=<user id>): the page reads the id from the start param
+  app.get('/playlist', (req, res) => res.sendFile(path.join(__dirname, 'playlist.html')));
 
   // browsers get the playlist page, API clients (or ?format=json) get JSON
   app.get('/playlist/:userid', wrap(async (req, res) => {
@@ -502,9 +529,19 @@ function startApi({ songs, users, queues }) {
     ]);
     const n = new Map(counts.map(c => [c._id, c.n]));
     const gCount = new Map(await Promise.all(caps.filter(c => c.genre).map(async c => [c._id, await songs.countDocuments(capFilter(uid, c))])));
-    const out = await Promise.all([{ _id: 'all', name: 'All', count: total }, ...caps.map(c => ({ _id: c._id, name: c.name, genre: c.genre || null, include: c.include, excluded: c.excluded, count: c.genre ? gCount.get(c._id) : n.get(c._id) || 0 }))]
+    const out = await Promise.all(orderCaps(u, [{ _id: 'all', name: 'All', count: total }, ...caps.map(c => ({ _id: c._id, name: c.name, genre: c.genre || null, include: c.include, excluded: c.excluded, count: c.genre ? gCount.get(c._id) : n.get(c._id) || 0 }))])
       .map(async c => ({ id: c._id, name: c.name, genre: c.genre || null, count: c.count, covers: await coversOf(uid, c) })));
     res.json({ user: shapeUser(u), count: caps.length, capsules: out });
+  }));
+
+  // body: { order: [capsule ids, "all" included] } - the first one is shown first on the playlist page
+  app.put('/me/capsules/order', auth, wrap(async (req, res) => {
+    const mine = new Set((await capsules.find({ user_id: req.uid }).project({ _id: 1 }).toArray()).map(c => c._id));
+    mine.add('all');
+    const want = Array.isArray(req.body?.order) ? req.body.order.map(String) : [];
+    const order = [...new Set(want.filter(id => mine.has(id)))];
+    await users.updateOne({ _id: req.uid }, { $set: { cap_order: order } });
+    res.json({ ok: true, order });
   }));
 
   app.post('/me/capsules', auth, wrap(async (req, res) => {
@@ -1189,6 +1226,60 @@ bot.command('manage', ctx => {
 bot.command('me', async ctx => {
   const u = await users.findOne({ _id: ctx.from.id });
   ctx.reply(`You've shared ${u?.song_count || 0} songs.`);
+});
+
+// ---------- /profile ----------
+const fmtTime = s => { s = Math.round(s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s`; };
+const nf = n => Number(n || 0).toLocaleString('en-US');
+const dispName = u => [u.first_name, u.last_name].filter(Boolean).join(' ') || (u.username ? '@' + u.username : `User ${u._id ?? u.id}`);
+const MINIAPP_NAME = process.env.MINIAPP_NAME || 'playlist';   // short name of the Mini App in BotFather (t.me/<bot>/<MINIAPP_NAME>)
+
+// who: a replied-to user, a text mention, @username / numeric id after the command, else the sender
+async function profileTarget(ctx) {
+  const m = ctx.message, rep = m.reply_to_message?.from;
+  if (rep && !rep.is_bot) return { id: rep.id, tg: rep };
+  const ent = (m.entities || []).find(e => e.type === 'text_mention' && e.user);
+  if (ent) return { id: ent.user.id, tg: ent.user };
+  const arg = (m.text || '').replace(/^\/\w+(@\w+)?\s*/, '').trim().split(/\s+/)[0];
+  if (arg) {
+    if (/^\d{5,}$/.test(arg)) return { id: Number(arg), tg: null, asked: true };
+    const un = arg.replace(/^@/, '');
+    if (/^\w{3,32}$/.test(un)) {
+      const u = await users.findOne({ username: new RegExp('^' + escRx(un) + '$', 'i') });
+      return u ? { id: u._id, tg: null } : { id: null, asked: true };
+    }
+  }
+  return { id: ctx.from.id, tg: ctx.from, self: true };
+}
+
+async function profileStats(uid) {
+  const [u, capCount, agg, top] = await Promise.all([
+    users.findOne({ _id: uid }),
+    capsules.countDocuments({ user_id: uid }),
+    songs.aggregate([{ $match: { user_id: uid } }, { $group: { _id: null, plays: { $sum: '$listens' }, secs: { $sum: '$listen_seconds' }, songs: { $sum: 1 } } }]).toArray(),
+    songs.find({ user_id: uid, listens: { $gt: 0 } }).sort({ listens: -1, created_at: -1 }).limit(1).toArray(),
+  ]);
+  const plays = agg[0]?.plays || 0;
+  const higher = (await songs.aggregate([{ $group: { _id: '$user_id', p: { $sum: '$listens' } } }, { $match: { p: { $gt: plays } } }, { $count: 'n' }]).toArray())[0]?.n || 0;
+  return { u, capCount, plays, secs: agg[0]?.secs || 0, songCount: agg[0]?.songs || 0, rank: higher + 1, fav: top[0] || null };
+}
+
+bot.command('profile', async ctx => {
+  const t = await profileTarget(ctx);
+  const replyTo = ctx.message.message_id;
+  if (t.id == null) return say(ctx, "I don't know that user.", replyTo);
+  const st = await profileStats(t.id);
+  if (!st.u && !st.songCount && !t.self) return say(ctx, "That user hasn't shared any songs yet.", replyTo);
+  const who_ = st.u ? dispName(st.u) : t.tg ? dispName(t.tg) : `User ${t.id}`;
+  const fav = st.fav ? `${st.fav.title || 'Unknown'}${st.fav.artist ? ' — ' + st.fav.artist : ''} (${nf(st.fav.listens)} ${st.fav.listens === 1 ? 'play' : 'plays'})` : '—';
+  const text = [`Name: ${who_}`, `Capsules: ${nf(st.capCount)}`, `Listening Time: ${fmtTime(st.secs)}`, `Total Plays: ${nf(st.plays)}`, `Rank: #${st.rank}`, `Favorite Song: ${fav}`].join('\n');
+  const botUser = ctx.botInfo?.username || process.env.BOT_USERNAME;
+  const kb = botUser ? Markup.inlineKeyboard([[Markup.button.url('Playlist', `https://t.me/${botUser}/${MINIAPP_NAME}?startapp=${t.id}`)]]) : {};
+  try { await ctx.reply(text, { ...kb, reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } }); }
+  catch (e) {
+    console.error(`[${new Date().toISOString()}] [audio] /profile reply failed: ${e.description || e.message}`);
+    await ctx.reply(text, kb).catch(e2 => console.error(`[${new Date().toISOString()}] [audio] /profile retry failed: ${e2.description || e2.message}`));
+  }
 });
 
 // /upload - owner only. Reply to an audio file with /upload to force-process it.
