@@ -337,7 +337,12 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
 <script>
 (() => {
   const $ = id => document.getElementById(id), audio = $('audio');
-  const uid = location.pathname.replace(/\/+$/, '').split('/').pop();
+  const launch = (() => { const q = new URLSearchParams(location.search), h = location.hash.slice(1); return q.get('tgWebAppStartParam') || (h.includes('=') ? new URLSearchParams(h).get('tgWebAppStartParam') : null); })();
+  const uid = (() => {
+    const seg = location.pathname.replace(/\/+$/, '').split('/').pop();
+    try { if (launch) sessionStorage.setItem('pl_uid', launch); return /^\d+$/.test(seg) ? seg : launch || sessionStorage.getItem('pl_uid') || seg; } catch { return /^\d+$/.test(seg) ? seg : launch || seg; }
+  })();
+  const hashId = () => { const h = location.hash.slice(1); return h.includes('=') ? '' : decodeURIComponent(h); };   // Telegram's own launch params (#tgWebApp...=) are not capsule ids
   const PREVIEW = new URLSearchParams(location.search).has('preview') && window.parent !== window;   // embedded live preview inside /manage
   const S = { capsules: [], scope: 'all', songs: [], top: [], user: null, stats: null, arts: null, now: null, queue: [], qMore: false, qVer: 0,
     shuffle: false, repeat: 0, q: '', sort: 'def', page: 0, pages: 1, total: 0, ver: 0, pending: null, failed: false, ac: null, shown: 0, theme: null };
@@ -602,6 +607,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
   }
   function play(s) {
     if (!ok(s)) return;
+    flushPing(); PG.id = s.song_id; PG.last = null;
     S.now = s; S.counted = null; S.tried = false;
     audio.src = s.hf_url || s.listen_url;
     audio.play().catch(() => {});
@@ -633,6 +639,24 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     S.counted = s.song_id;
     if (s.listen_url) fetch(s.listen_url, { method: 'POST', keepalive: true }).then(r => r.json()).then(j => { if (j.counted && S.stats) S.stats.listens++; fresh(s); }).catch(() => {});
   });
+  // listening time: report the seconds actually played, every ~15s and whenever playback stops (never from the manage preview)
+  const PG = { id: null, acc: 0, last: null };
+  function flushPing(leaving) {
+    const id = PG.id, sec = Math.round(PG.acc); PG.acc = 0;
+    if (!id || sec < 1 || PREVIEW) return;
+    const u = `/listen/${encodeURIComponent(id)}/ping`, body = JSON.stringify({ seconds: sec });
+    if (leaving && navigator.sendBeacon && navigator.sendBeacon(u, new Blob([body], { type: 'application/json' }))) return;
+    fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+  }
+  audio.addEventListener('timeupdate', () => {
+    const t = audio.currentTime;
+    if (PG.last !== null && !audio.paused) { const d = t - PG.last; if (d > 0 && d < 5) PG.acc += d; }
+    PG.last = t;
+    if (PG.acc >= 15) flushPing();
+  });
+  ['pause', 'ended', 'seeking'].forEach(ev => audio.addEventListener(ev, () => { flushPing(); PG.last = null; }));
+  addEventListener('pagehide', () => flushPing(true));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushPing(true); });
   audio.addEventListener('waiting', () => { if (S.now) $('npA').textContent = 'Buffering…'; });
   audio.addEventListener('error', () => {
     const s = S.now; if (!s) return;
@@ -658,10 +682,8 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
       ['Plays', `<span id="live">${s.listens || 0}</span>`, 1],
       ['Added', s.created_at && new Date(s.created_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })], ['Song ID', s.song_id]]
       .filter(r => r[1] !== null && r[1] !== undefined && r[1] !== '' && r[1] !== false);
-    const f = s.hf_url || s.listen_url;
     $('dBody').innerHTML = `<div class="dart">${thumb(s)}</div><div class="dt">${esc(s.title || 'Unknown')}</div><div class="da">${esc(s.artist || 'Unknown artist')}</div>
-      <dl class="grid">${rows.map(([k, v, raw]) => `<dt>${k}</dt><dd class="num">${raw ? v : esc(v)}</dd>`).join('')}</dl>
-      <div class="links">${f ? `<a href="${esc(f)}" target="_blank" rel="noopener">File</a>` : ''}${s.info_url ? `<a href="${esc(s.info_url)}" target="_blank" rel="noopener">JSON</a>` : ''}</div>`;
+      <dl class="grid">${rows.map(([k, v, raw]) => `<dt>${k}</dt><dd class="num">${raw ? v : esc(v)}</dd>`).join('')}</dl>`;
     settle($('dBody'));
   }
   async function fresh(s) {
@@ -698,11 +720,11 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     $('boot').hidden = true;
     $('caps').hidden = !grid; $('listView').hidden = grid; $('bBack').hidden = grid || !S.capsules.length;
     rise($(grid ? 'caps' : 'listView'));
-    if (grid) { S.ver++; S.ac?.abort(); S.pending = null; S.songs = []; S.page = 0; S.pages = 0; S.arts = S.capsules[0]?.covers || []; renderCaps(); return renderUser(); }
+    if (grid) { S.ver++; S.ac?.abort(); S.pending = null; S.songs = []; S.page = 0; S.pages = 0; S.arts = (S.capsules.find(c => c.id === 'all') || S.capsules[0])?.covers || []; renderCaps(); return renderUser(); }
     if (S.capsules.length && !S.capsules.some(c => c.id === scope)) { location.hash = ''; return; }
     renderUser(); load(true); loadTop();
   }
-  const route = () => { const h = S.capsules.length ? decodeURIComponent(location.hash.slice(1)) : ''; show(h || (S.capsules.length ? null : 'all')); };
+  const route = () => { const h = S.capsules.length ? hashId() : ''; show(h || (S.capsules.length ? null : 'all')); };
   window.addEventListener('hashchange', route);
   $('bBack').onclick = () => { location.hash = ''; };
 
