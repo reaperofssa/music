@@ -6,9 +6,14 @@ const path = require('path');
 const express = require('express');
 const cors = require('cors');
 
-const { BOT_TOKEN, MONGO_URI, UPLOAD_API } = process.env; // UPLOAD_API e.g. https://your-host/api/upload
+const { BOT_TOKEN, MONGO_URI, HF_TOKEN, HF_USERNAME, HF_BACKUP_ACCOUNTS = '' } = process.env;
+const SHORT_URL_BASE = process.env.SHORT_URL_BASE ?? 'https://uploadnx.zone.id/'; // set empty to use raw HF urls
+const UPLOADER_DB = process.env.UPLOADER_DB || 'xcatbox_clone'; // same db the python uploader / short-url service uses
+const MAX_DATASET_SIZE = 12 * 1024 ** 3;   // 12GB per dataset
+const MAX_ACCOUNT_STORAGE = 150 * 1024 ** 3; // 150GB per account
+const DEST_DIR = 'uploads';
 const bot = new Telegraf(BOT_TOKEN);
-let users, songs, queues, mm;
+let users, songs, queues, mm, hub, hfFiles, hfSettings;
 
 // ---------- poster (Deezer) ----------
 const L = '\\p{L}\\p{M}\\p{N}';
@@ -368,12 +373,80 @@ async function genSongId() {
 
 const queue = (() => { let p = Promise.resolve(); return fn => (p = p.then(fn, fn)); })(); // one job at a time
 
+// ---------- Hugging Face uploader (ported from uploader.py) ----------
+// HF_BACKUP_ACCOUNTS="user1:hf_token1,user2:hf_token2"
+const hfAccounts = () => [
+  { username: HF_USERNAME, token: HF_TOKEN },
+  ...HF_BACKUP_ACCOUNTS.split(',').map(x => x.trim()).filter(Boolean).map(x => {
+    const i = x.indexOf(':'); return { username: x.slice(0, i), token: x.slice(i + 1) };
+  }),
+].filter(a => a.username && a.token);
+
+const hfStorage = (username) => hfSettings.findOneAndUpdate(
+  { _id: `account_storage_${username}` },
+  { $setOnInsert: { username, total_size: 0, datasets: [] } },
+  { upsert: true, returnDocument: 'after' });
+
+async function shortCode(len = 6) {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  for (;;) {
+    const code = Array.from(crypto.randomBytes(len), b => chars[b % chars.length]).join('');
+    if (!(await hfFiles.findOne({ short_code: code }, { projection: { _id: 1 } }))) return code;
+  }
+}
+
+async function ensureDataset(repoName, token) {
+  const repo = { type: 'dataset', name: repoName };
+  if (await hub.repoExists({ repo, accessToken: token })) return;
+  await hub.createRepo({
+    repo, accessToken: token, visibility: 'public', license: 'mit',
+    files: [{ path: 'README.md', content: new Blob([`---\nlicense: mit\n---\n\n# File Storage Dataset\n\nFiles live in \`${DEST_DIR}/\`.\n`]) }],
+  });
+}
+
+// uploads one buffer straight to Hugging Face, trying each account in order. returns { short_url, code, hf_url }
 async function uploadToHost(buf, filename, mime) {
-  const fd = new FormData();
-  fd.append('file', new Blob([buf], { type: mime }), filename);
-  const r = await fetch(UPLOAD_API, { method: 'POST', body: fd });
-  if (!r.ok) throw new Error(`upload failed ${r.status}`);
-  return r.json(); // { short_url, code, hf_url? }
+  const size = buf.length;
+  const ext = path.extname(filename);
+  const errors = [];
+
+  for (const { username, token } of hfAccounts()) {
+    try {
+      const st = await hfStorage(username);
+      if (st.total_size + size > MAX_ACCOUNT_STORAGE) { errors.push(`${username}: full`); continue; }
+
+      // newest dataset, or a fresh one when it would pass 12GB
+      const last = st.datasets[st.datasets.length - 1];
+      let name = last && last.size + size <= MAX_DATASET_SIZE ? last.name : null;
+      if (!name) {
+        do name = `file-storage-${1000 + crypto.randomInt(9000)}`; while (st.datasets.some(d => d.name === name));
+      }
+      const repoName = `${username}/${name}`;
+      await ensureDataset(repoName, token);
+
+      const code = await shortCode();
+      const dest = `${DEST_DIR}/${code}${ext}`;
+      await hub.uploadFile({
+        repo: { type: 'dataset', name: repoName }, accessToken: token,
+        file: { path: dest, content: new Blob([buf], { type: mime || 'application/octet-stream' }) },
+        commitTitle: `Upload ${code}${ext}`,
+      });
+
+      const hf_url = `https://huggingface.co/datasets/${repoName}/resolve/main/${dest}`;
+      await hfFiles.insertOne({ short_code: code, file_name: `${code}${ext}`, original_path: filename, hf_url, dataset: name, size, uploader: username });
+
+      // bump counters: existing dataset entry first, else push a new one
+      const id = `account_storage_${username}`;
+      const r = await hfSettings.updateOne({ _id: id, 'datasets.name': name }, { $inc: { 'datasets.$.size': size, total_size: size } });
+      if (!r.matchedCount) await hfSettings.updateOne({ _id: id }, { $inc: { total_size: size }, $push: { datasets: { name, size } } });
+
+      return { short_url: SHORT_URL_BASE ? `${SHORT_URL_BASE}${code}${ext}` : hf_url, code, hf_url };
+    } catch (e) {
+      errors.push(`${username}: ${e.message}`);
+      console.warn(`[hf] upload failed for ${username}: ${e.message}`);
+    }
+  }
+  throw new Error(`upload failed on all Hugging Face accounts (${errors.join('; ') || 'none configured'})`);
 }
 
 const extOf = (name, mime) =>
@@ -518,8 +591,14 @@ bot.on('message', (ctx, next) => {
 // ---------- boot ----------
 (async () => {
   mm = await import('music-metadata');
+  hub = await import('@huggingface/hub');
   const client = await new MongoClient(MONGO_URI).connect();
   const db = client.db('audio_bot');
+  const udb = client.db(UPLOADER_DB);
+  hfFiles = udb.collection('xfiles');
+  hfSettings = udb.collection('xsettings');
+  await hfFiles.createIndex({ short_code: 1 }, { unique: true });
+  if (!hfAccounts().length) console.warn('[hf] no Hugging Face accounts configured (HF_USERNAME/HF_TOKEN)');
   users = db.collection('users');
   songs = db.collection('songs');
   queues = db.collection('queues');
