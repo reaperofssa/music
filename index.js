@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const { MongoClient } = require('mongodb');
 const crypto = require('crypto');
 const path = require('path');
@@ -16,7 +16,7 @@ const log = (...a) => console.log(`[${new Date().toISOString()}] [audio]`, ...a)
 const who = u => u ? `${u.id}${u.username ? ' @' + u.username : ''}` : '?';
 const mb = n => n ? (n / 1048576).toFixed(2) + 'MB' : '?';
 const bot = new Telegraf(BOT_TOKEN);
-let users, songs, queues, mm, hub, hfFiles, hfSettings;
+let users, songs, queues, capsules, capSongs, mm, hub, hfFiles, hfSettings;
 
 // ---------- poster (Deezer) ----------
 const L = '\\p{L}\\p{M}\\p{N}';
@@ -166,13 +166,47 @@ async function backfillDeezer() {
   log(`deezer backfill finished: ${done} updated, ${miss} had no data`);
 }
 
+// ---------- auth: Telegram Mini App initData -> HS256 JWT in an HttpOnly cookie (only sent to /me/*) ----------
+const JWT_SECRET = process.env.JWT_SECRET || crypto.createHash('sha256').update('pl-jwt:' + BOT_TOKEN).digest('hex');
+if (!process.env.JWT_SECRET) console.warn('[auth] JWT_SECRET not set - deriving one from BOT_TOKEN (set JWT_SECRET to rotate sessions independently)');
+const SESSION_COOKIE = 'pl_session';
+const SESSION_TTL = 7 * 24 * 3600;     // seconds
+const INITDATA_MAX_AGE = 24 * 3600;    // seconds
+const COOKIE_OPTS = req => ({ httpOnly: true, secure: !!req.secure, sameSite: 'lax', path: '/me' });
+const b64u = x => Buffer.from(x).toString('base64url');
+const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest();
+const same = (a, b) => a.length === b.length && crypto.timingSafeEqual(a, b);
+
+const signJwt = payload => {
+  const h = b64u(JSON.stringify({ alg: 'HS256', typ: 'JWT' })), b = b64u(JSON.stringify(payload));
+  return `${h}.${b}.${hmac(JWT_SECRET, `${h}.${b}`).toString('base64url')}`;
+};
+const verifyJwt = tok => {
+  const [h, b, sig] = String(tok || '').split('.');
+  if (!h || !b || !sig || !same(Buffer.from(sig, 'base64url'), hmac(JWT_SECRET, `${h}.${b}`))) return null;
+  try { const p = JSON.parse(Buffer.from(b, 'base64url').toString()); return p.exp > Date.now() / 1000 ? p : null; } catch { return null; }
+};
+// https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+function verifyInitData(raw) {
+  const params = new URLSearchParams(String(raw || ''));
+  const hash = params.get('hash');
+  if (!hash) return null;
+  params.delete('hash');
+  const check = [...params.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => `${k}=${v}`).join('\n');
+  if (!same(Buffer.from(hash, 'hex'), hmac(hmac('WebAppData', BOT_TOKEN), check))) return null;
+  if (Date.now() / 1000 - Number(params.get('auth_date')) > INITDATA_MAX_AGE) return null;
+  try { const u = JSON.parse(params.get('user')); return Number.isInteger(u?.id) ? u : null; } catch { return null; }
+}
+const cookieOf = (req, name) => (req.headers.cookie || '').split(';').map(c => c.trim().split(/=(.*)/s)).find(([k]) => k === name)?.[1];
+
 // ---------- api ----------
 const BASE = (process.env.BASE_URL || '').replace(/\/$/, '');
 const PER_PAGE = 80;
 const HOT_LIMIT = 60;
+const MAX_CAPSULES = 50, MAX_CAPSULE_SONGS = 2000, GAP = 1024;
 // _id last = stable order across pages when the sort key ties
 const SORTS = {
-  def: { created_at: -1, _id: -1 },
+  def: { pos: 1, created_at: -1, _id: -1 },   // pos = the owner's custom order (null = not placed yet = newest, on top)
   title: { title: 1, _id: 1 },
   artist: { artist: 1, title: 1, _id: 1 },
   plays: { listens: -1, created_at: -1, _id: -1 },
@@ -292,23 +326,45 @@ function startApi({ songs, users, queues }) {
     const u = await users.findOne({ _id: uid });
     if (!u) return res.status(404).json({ error: 'user not found' });
 
-    const filter = { user_id: uid };
+    // scope: all songs, or one capsule (its order lives in capsule_songs)
+    const scope = String(req.query.capsule || 'all');
+    let cap = { id: 'all', name: 'All' }, ids = null;
+    if (scope !== 'all') {
+      const c = await capsules.findOne({ _id: scope, user_id: uid });
+      if (!c) return res.status(404).json({ error: 'capsule not found' });
+      cap = { id: c._id, name: c.name };
+      ids = (await capSongs.find({ capsule_id: c._id }).sort({ pos: 1 }).project({ song_id: 1 }).toArray()).map(x => x.song_id);
+    }
+    const base = ids ? { user_id: uid, song_id: { $in: ids } } : { user_id: uid };
+    const filter = { ...base };
     if (q) {
       const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       filter.$or = ['title', 'artist', 'album', 'album_artist', 'genre', 'label'].map(f => ({ [f]: rx })); // arrays (genre) match per element
     }
+    const skip = (page - 1) * limit;
 
-    const [total, items, agg] = await Promise.all([
-      songs.countDocuments(filter),
-      songs.find(filter).collation({ locale: 'en', strength: 2 }).sort(SORTS[sortKey]).skip((page - 1) * limit).limit(limit).toArray(),
-      page === 1 ? songs.aggregate([{ $match: { user_id: uid } },
-        { $group: { _id: null, listens: { $sum: '$listens' }, duration: { $sum: '$duration' }, songs: { $sum: 1 } } }]).toArray() : [],
-    ]);
+    let total, items;
+    if (ids && sortKey === 'def') {          // capsule order: filter, then page through the ordered ids
+      let list = ids;
+      if (q) { const hit = new Set((await songs.find(filter).project({ song_id: 1 }).toArray()).map(x => x.song_id)); list = ids.filter(i => hit.has(i)); }
+      total = list.length;
+      const slice = list.slice(skip, skip + limit);
+      const byId = new Map((await songs.find({ user_id: uid, song_id: { $in: slice } }).toArray()).map(x => [x.song_id, x]));
+      items = slice.map(i => byId.get(i)).filter(Boolean);
+    } else {
+      [total, items] = await Promise.all([
+        songs.countDocuments(filter),
+        songs.find(filter).collation({ locale: 'en', strength: 2 }).sort(SORTS[sortKey]).skip(skip).limit(limit).toArray(),
+      ]);
+    }
+    const agg = page === 1 ? await songs.aggregate([{ $match: base },
+      { $group: { _id: null, listens: { $sum: '$listens' }, duration: { $sum: '$duration' }, songs: { $sum: 1 } } }]).toArray() : [];
     res.json({
       user: shapeUser(u),
+      capsule: cap,
       page,
       per_page: limit,
-      total,                                  // matches for this q (== all songs when q is empty)
+      total,                                  // matches for this q (== all songs in the scope when q is empty)
       pages: Math.ceil(total / limit),
       q, sort: sortKey,
       ...(page === 1 && { stats: { songs: agg[0]?.songs || 0, listens: agg[0]?.listens || 0, duration: agg[0]?.duration || 0 } }),
@@ -329,6 +385,173 @@ function startApi({ songs, users, queues }) {
 
   // ---------- queue / player ----------
   app.use(express.json());
+
+  // owner editor page (Telegram Mini App); it signs in itself via /auth/tg
+  app.get('/manage', (req, res) => res.sendFile(path.join(__dirname, 'manage.html')));
+
+  // ===== sign-in: Telegram Mini App initData -> JWT cookie (HttpOnly, Path=/me, so only the /me/* APIs ever receive it) =====
+  const needHeader = (req, res) => req.get('x-requested-with') === 'playlist' || (res.status(403).json({ error: 'missing X-Requested-With: playlist header' }), false);
+  app.post('/auth/tg', wrap(async (req, res) => {
+    if (!needHeader(req, res)) return;
+    const u = verifyInitData(req.body?.initData);
+    if (!u) return res.status(401).json({ error: 'invalid or expired Telegram data' });
+    const now = Math.floor(Date.now() / 1000);
+    res.cookie(SESSION_COOKIE, signJwt({ sub: u.id, iat: now, exp: now + SESSION_TTL }), { ...COOKIE_OPTS(req), maxAge: SESSION_TTL * 1000 });
+    res.json({ user_id: u.id });
+  }));
+  app.get('/me', (req, res) => {
+    const p = verifyJwt(cookieOf(req, SESSION_COOKIE));
+    p ? res.json({ user_id: p.sub }) : res.status(401).json({ error: 'not signed in' });
+  });
+  app.post('/me/logout', (req, res) => { res.clearCookie(SESSION_COOKIE, COOKIE_OPTS(req)); res.json({ ok: true }); });
+
+  const auth = (req, res, next) => {
+    const p = verifyJwt(cookieOf(req, SESSION_COOKIE));
+    if (!p) return res.status(401).json({ error: 'not signed in' });
+    if (req.method !== 'GET' && !needHeader(req, res)) return;   // CSRF: a custom header forces a CORS preflight, which cross-site pages can't pass with cookies
+    req.uid = p.sub;
+    next();
+  };
+
+  // ===== capsules (sub-playlists). "all" is virtual = every song of the user =====
+  const cleanName = n => String(n ?? '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  const imgOf = s => s.image_url || s.poster_url || s.cover_url || null;
+  const dupKey = e => e?.code === 11000;
+
+  async function coversOf(uid, capsuleId) {
+    let docs;
+    if (capsuleId === 'all') docs = await songs.find({ user_id: uid }).sort(SORTS.def).limit(40).project({ image_url: 1, poster_url: 1, cover_url: 1 }).toArray();
+    else {
+      const ids = (await capSongs.find({ capsule_id: capsuleId }).sort({ pos: 1 }).limit(24).project({ song_id: 1 }).toArray()).map(x => x.song_id);
+      const m = new Map((await songs.find({ song_id: { $in: ids } }).project({ song_id: 1, image_url: 1, poster_url: 1, cover_url: 1 }).toArray()).map(x => [x.song_id, x]));
+      docs = ids.map(i => m.get(i)).filter(Boolean);
+    }
+    return docs.map(imgOf).filter(Boolean).slice(0, 4);
+  }
+
+  // public: [] when the user has no capsules, else [All, ...capsules] with counts and cover art
+  app.get('/playlist/:userid/capsules', wrap(async (req, res) => {
+    const uid = Number(req.params.userid);
+    if (!Number.isInteger(uid)) return res.status(400).json({ error: 'invalid user id' });
+    const u = await users.findOne({ _id: uid });
+    if (!u) return res.status(404).json({ error: 'user not found' });
+    const caps = await capsules.find({ user_id: uid }).sort({ created_at: 1 }).toArray();
+    if (!caps.length) return res.json({ user: shapeUser(u), count: 0, capsules: [] });
+    const [total, counts] = await Promise.all([
+      songs.countDocuments({ user_id: uid }),
+      capSongs.aggregate([{ $match: { user_id: uid } }, { $group: { _id: '$capsule_id', n: { $sum: 1 } } }]).toArray(),
+    ]);
+    const n = new Map(counts.map(c => [c._id, c.n]));
+    const out = await Promise.all([{ _id: 'all', name: 'All', count: total }, ...caps.map(c => ({ _id: c._id, name: c.name, count: n.get(c._id) || 0 }))]
+      .map(async c => ({ id: c._id, name: c.name, count: c.count, covers: await coversOf(uid, c._id) })));
+    res.json({ user: shapeUser(u), count: caps.length, capsules: out });
+  }));
+
+  app.post('/me/capsules', auth, wrap(async (req, res) => {
+    const name = cleanName(req.body?.name);
+    if (!name) return res.status(400).json({ error: 'name required' });
+    if (await capsules.countDocuments({ user_id: req.uid }) >= MAX_CAPSULES) return res.status(400).json({ error: `max ${MAX_CAPSULES} capsules` });
+    const c = { _id: crypto.randomBytes(5).toString('hex'), user_id: req.uid, name, name_key: name.toLowerCase(), created_at: new Date() };
+    try { await capsules.insertOne(c); } catch (e) { if (dupKey(e)) return res.status(409).json({ error: 'you already have a capsule with that name' }); throw e; }
+    res.status(201).json({ id: c._id, name: c.name, count: 0 });
+  }));
+
+  app.patch('/me/capsules/:cid', auth, wrap(async (req, res) => {
+    const name = cleanName(req.body?.name);
+    if (!name) return res.status(400).json({ error: 'name required' });
+    try {
+      const r = await capsules.updateOne({ _id: req.params.cid, user_id: req.uid }, { $set: { name, name_key: name.toLowerCase(), updated_at: new Date() } });
+      if (!r.matchedCount) return res.status(404).json({ error: 'capsule not found' });
+    } catch (e) { if (dupKey(e)) return res.status(409).json({ error: 'you already have a capsule with that name' }); throw e; }
+    res.json({ id: req.params.cid, name });
+  }));
+
+  // songs stay in All; only the capsule and its membership go
+  app.delete('/me/capsules/:cid', auth, wrap(async (req, res) => {
+    const r = await capsules.deleteOne({ _id: req.params.cid, user_id: req.uid });
+    if (!r.deletedCount) return res.status(404).json({ error: 'capsule not found' });
+    await capSongs.deleteMany({ capsule_id: req.params.cid });
+    res.json({ ok: true });
+  }));
+
+  // copy songs from All into a capsule (appended at the end; skips ones already inside)
+  app.post('/me/capsules/:cid/songs', auth, wrap(async (req, res) => {
+    const cid = req.params.cid;
+    if (!(await capsules.findOne({ _id: cid, user_id: req.uid }, { projection: { _id: 1 } }))) return res.status(404).json({ error: 'capsule not found' });
+    const raw = Array.isArray(req.body?.song_ids) ? req.body.song_ids : req.body?.song_id ? [req.body.song_id] : [];
+    const want = [...new Set(raw.map(String))].slice(0, 200);
+    if (!want.length) return res.status(400).json({ error: 'song_ids required' });
+    const [mine, have, count, last] = await Promise.all([
+      songs.find({ user_id: req.uid, song_id: { $in: want } }).project({ song_id: 1 }).toArray(),
+      capSongs.find({ capsule_id: cid, song_id: { $in: want } }).project({ song_id: 1 }).toArray(),
+      capSongs.countDocuments({ capsule_id: cid }),
+      capSongs.find({ capsule_id: cid }).sort({ pos: -1 }).limit(1).project({ pos: 1 }).toArray(),
+    ]);
+    const owned = new Set(mine.map(x => x.song_id)), dup = new Set(have.map(x => x.song_id));
+    const add = want.filter(i => owned.has(i) && !dup.has(i)).slice(0, Math.max(0, MAX_CAPSULE_SONGS - count));
+    const start = last[0] ? last[0].pos : -GAP;
+    if (add.length) await capSongs.insertMany(add.map((song_id, i) => ({ capsule_id: cid, user_id: req.uid, song_id, pos: start + GAP * (i + 1), added_at: new Date() })), { ordered: false }).catch(e => { if (!dupKey(e) && e.code !== 65) throw e; });
+    res.json({ added: add.length, skipped: want.length - add.length });
+  }));
+
+  // :cid is a capsule id, or "all" for the main playlist
+  const scopeOf = async (req, res) => {
+    if (req.params.cid === 'all') return 'all';
+    const c = await capsules.findOne({ _id: req.params.cid, user_id: req.uid }, { projection: { _id: 1 } });
+    if (!c) res.status(404).json({ error: 'capsule not found' });
+    return c?._id || null;
+  };
+  const orderOf = async (uid, scope) => scope === 'all'
+    ? (await songs.find({ user_id: uid }).sort(SORTS.def).project({ song_id: 1, pos: 1 }).toArray()).map(x => ({ id: x.song_id, pos: x.pos ?? null }))
+    : (await capSongs.find({ capsule_id: scope }).sort({ pos: 1 }).project({ song_id: 1, pos: 1 }).toArray()).map(x => ({ id: x.song_id, pos: x.pos }));
+  const placePos = (uid, scope, id, pos) => scope === 'all'
+    ? songs.updateOne({ user_id: uid, song_id: id }, { $set: { pos } })
+    : capSongs.updateOne({ capsule_id: scope, song_id: id }, { $set: { pos } });
+  const renumber = (uid, scope, ids) => (scope === 'all' ? songs : capSongs).bulkWrite(ids.map((id, i) => ({
+    updateOne: { filter: scope === 'all' ? { user_id: uid, song_id: id } : { capsule_id: scope, song_id: id }, update: { $set: { pos: i * GAP } } } })));
+
+  // body: { index } (0-based in the full list) | { before: song_id } | { after: song_id } | { to: 'top' | 'bottom' }
+  app.patch('/me/capsules/:cid/songs/:sid/move', auth, wrap(async (req, res) => {
+    const scope = await scopeOf(req, res); if (!scope) return;
+    const sid = req.params.sid, { index, before, after, to } = req.body || {};
+    const list = await orderOf(req.uid, scope);
+    const from = list.findIndex(x => x.id === sid);
+    if (from < 0) return res.status(404).json({ error: 'song not in this list' });
+    const rest = list.filter(x => x.id !== sid);
+    let at;
+    if (Number.isInteger(index)) at = Math.min(Math.max(index, 0), rest.length);
+    else if (before) at = rest.findIndex(x => x.id === String(before));
+    else if (after) at = rest.findIndex(x => x.id === String(after)) + 1 || -1;
+    else if (to === 'top') at = 0;
+    else if (to === 'bottom') at = rest.length;
+    else return res.status(400).json({ error: 'give index, before, after or to' });
+    if (at < 0) return res.status(400).json({ error: 'anchor song not in this list' });
+    if (at === from) return res.json({ ok: true, index: at });
+
+    const prev = rest[at - 1], next = rest[at];
+    if (list.some(x => x.pos == null) || (prev && next && next.pos - prev.pos < 1e-6)) {   // legacy songs without a position, or no gap left: number everything
+      const ids = rest.map(x => x.id); ids.splice(at, 0, sid);
+      await renumber(req.uid, scope, ids);
+    } else {
+      await placePos(req.uid, scope, sid, prev && next ? (prev.pos + next.pos) / 2 : prev ? prev.pos + GAP : next ? next.pos - GAP : 0);
+    }
+    res.json({ ok: true, index: at });
+  }));
+
+  // capsule: removes the song from that capsule only. "all": deletes the song from the playlist (and every capsule)
+  app.delete('/me/capsules/:cid/songs/:sid', auth, wrap(async (req, res) => {
+    const scope = await scopeOf(req, res); if (!scope) return;
+    const sid = req.params.sid;
+    if (scope === 'all') {
+      const r = await songs.deleteOne({ user_id: req.uid, song_id: sid });
+      if (!r.deletedCount) return res.status(404).json({ error: 'song not found' });
+      await Promise.all([capSongs.deleteMany({ user_id: req.uid, song_id: sid }), users.updateOne({ _id: req.uid }, { $inc: { song_count: -1 } })]);
+      return res.json({ ok: true, deleted: true });
+    }
+    const r = await capSongs.deleteOne({ capsule_id: scope, song_id: sid });
+    if (!r.deletedCount) return res.status(404).json({ error: 'song not in this capsule' });
+    res.json({ ok: true, deleted: false });
+  }));
   app.param('qid', (req, res, next, v) =>
     /^[\w-]{1,64}$/.test(v) ? next() : res.status(400).json({ error: 'invalid queue id' }));
 
@@ -371,11 +594,15 @@ function startApi({ songs, users, queues }) {
   // body: { song_id?, user_id?, hot?, shuffle? }
   // song_id alone = that song; + user_id/hot = that song inside the playlist; no song_id = start from the top
   app.post('/queue/:qid/play', wrap(async (req, res) => {
-    const { song_id, user_id, hot, shuffle } = req.body || {};
+    const { song_id, user_id, hot, shuffle, capsule_id } = req.body || {};
     let ids = [];
-    if (user_id != null) {
+    if (user_id != null && capsule_id && capsule_id !== 'all') {
+      const mem = (await capSongs.find({ capsule_id: String(capsule_id), user_id: Number(user_id) }).sort({ pos: 1 }).limit(500).project({ song_id: 1 }).toArray()).map(x => x.song_id);
+      const up = new Set((await songs.find({ song_id: { $in: mem }, uploaded: true }).project({ song_id: 1 }).toArray()).map(x => x.song_id));
+      ids = mem.filter(i => up.has(i));
+    } else if (user_id != null) {
       ids = (await songs.find({ user_id: Number(user_id), uploaded: true })
-        .sort({ created_at: -1 }).limit(500).project({ song_id: 1 }).toArray()).map(s => s.song_id);
+        .sort(SORTS.def).limit(500).project({ song_id: 1 }).toArray()).map(s => s.song_id);
     } else if (hot) {
       ids = (await songs.find({ uploaded: true })
         .sort({ listens: -1, created_at: -1 }).limit(HOT_LIMIT).project({ song_id: 1 }).toArray()).map(s => s.song_id);
@@ -768,6 +995,13 @@ bot.command('top', async ctx => {
     `${i + 1}. ${u.username ? '@' + u.username : u.first_name} — ${u.song_count}`).join('\n'));
 });
 
+// opens manage.html as a Mini App; that is what signs the owner in (initData -> /auth/tg)
+bot.command('manage', ctx => {
+  if (ctx.chat.type !== 'private') return ctx.reply('Send /manage to me in a private chat.');
+  if (!BASE.startsWith('https://')) return ctx.reply('BASE_URL must be https for Mini Apps.');
+  return ctx.reply('Manage your playlist and capsules:', Markup.inlineKeyboard([Markup.button.webApp('Open manager', `${BASE}/manage`)]));
+});
+
 bot.command('me', async ctx => {
   const u = await users.findOne({ _id: ctx.from.id });
   ctx.reply(`You've shared ${u?.song_count || 0} songs.`);
@@ -819,12 +1053,19 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   users = db.collection('users');
   songs = db.collection('songs');
   queues = db.collection('queues');
+  capsules = db.collection('capsules');
+  capSongs = db.collection('capsule_songs');
   await queues.createIndex({ updated_at: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
   await songs.createIndex({ chat_id: 1, file_unique_id: 1 }, { unique: true });
   await songs.createIndex({ song_id: 1 }, { unique: true, sparse: true });
   await songs.createIndex({ user_id: 1, created_at: -1 });
   await songs.createIndex({ listens: -1, created_at: -1 });
   await songs.createIndex({ user_id: 1, listens: -1, created_at: -1 });
+  await songs.createIndex({ user_id: 1, pos: 1, created_at: -1 });
+  await capsules.createIndex({ user_id: 1, name_key: 1 }, { unique: true });
+  await capSongs.createIndex({ capsule_id: 1, song_id: 1 }, { unique: true });
+  await capSongs.createIndex({ capsule_id: 1, pos: 1 });
+  await capSongs.createIndex({ user_id: 1, song_id: 1 });
   await songs.createIndex({ user_id: 1, release_date: -1 });
   startApi({ songs, users, queues });
   if (process.env.BACKFILL_DEEZER === '1') backfillDeezer().catch(e => console.error('[deezer backfill] failed:', e));
