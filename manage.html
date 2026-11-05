@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Manage · @playlists</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#000;--s1:#121212;--s2:#1c1c1c;--s3:#2c2c2c;--line:#262626;--text:#fff;--mut:#a3a3a3;--dim:#6b6b6b;color-scheme:dark}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--text);font:13px/1.4 "Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+body{min-height:100svh;padding-bottom:calc(84px + env(safe-area-inset-bottom))}
+button,input{font:inherit;color:inherit}
+button{background:none;border:0;cursor:pointer}
+a{color:inherit;text-decoration:none}
+svg{width:1em;height:1em;fill:currentColor;display:block}
+:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.num{font-variant-numeric:tabular-nums}
+.ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wrap{max-width:760px;margin:0 auto;padding:0 16px}
+.hd{display:flex;align-items:center;gap:8px;padding:max(14px,env(safe-area-inset-top)) 0 4px}
+.brand{font-weight:800;font-size:15px;letter-spacing:-.02em}
+.brand i{display:inline-block;width:8px;height:8px;border-radius:50%;background:#fff;margin-right:7px}
+.hd .sub{color:var(--mut);font-size:12px}
+.sp{flex:1}
+.pill{height:30px;padding:0 12px;border-radius:99px;background:var(--s2);font-size:12px;font-weight:600;white-space:nowrap;display:inline-grid;place-items:center}
+.pill:hover{background:var(--s3)}
+.pill.pri{background:#fff;color:#000}
+.pill[disabled]{opacity:.4;cursor:default}
+h1{font-size:clamp(24px,6vw,36px);font-weight:800;letter-spacing:-.03em;margin:14px 0 2px}
+.meta{color:var(--mut);font-size:12px}
+
+.chips{display:flex;gap:6px;overflow-x:auto;padding:14px 0 10px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;height:32px;padding:0 14px;border-radius:99px;background:var(--s2);font-size:12px;font-weight:600}
+.chip:hover{background:var(--s3)}
+.chip.on{background:#fff;color:#000}
+.chip small{color:var(--dim);margin-left:6px;font-weight:500}.chip.on small{color:#555}
+.chip.add{background:none;border:1px dashed var(--s3);color:var(--mut)}
+
+.tb{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:6px;padding:8px 0;background:linear-gradient(var(--bg) 85%,transparent)}
+.search{display:flex;align-items:center;gap:7px;height:32px;padding:0 10px;border-radius:99px;background:var(--s2);flex:1;max-width:260px;min-width:0}
+.search:focus-within{background:var(--s3)}
+.search svg{font-size:14px;color:var(--mut);flex:none}
+.search input{flex:1;min-width:0;background:none;border:0;outline:0;font-size:13px}
+.search input::placeholder{color:var(--dim)}
+.tools{display:flex;gap:6px}
+
+.r{display:grid;grid-template-columns:26px 36px minmax(0,1fr) auto;gap:10px;align-items:center;padding:5px 6px;border-radius:5px;min-height:50px}
+.r:hover{background:var(--s1)}.r.sel{background:var(--s2)}
+.ck{display:grid;place-items:center;width:26px;height:26px;cursor:pointer}
+.ck input{appearance:none;-webkit-appearance:none;width:16px;height:16px;border-radius:4px;border:1.5px solid var(--dim);background:none;cursor:pointer;display:grid;place-items:center}
+.ck input:checked{background:#fff;border-color:#fff}
+.ck input:checked::after{content:"";width:8px;height:4px;border:solid #000;border-width:0 0 2px 2px;transform:rotate(-45deg) translate(1px,-1px)}
+.th{width:36px;height:36px;border-radius:3px;background:var(--s3);display:grid;place-items:center;font-size:13px;color:var(--dim);overflow:hidden}
+.th img{width:100%;height:100%;object-fit:cover;filter:grayscale(1)}
+.t{font-weight:600;font-size:13px}.a{color:var(--mut);font-size:12px}
+.ac{display:flex;gap:0}
+.ib{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:16px;color:var(--mut)}
+.ib:hover:not([disabled]){color:#fff;background:var(--s3)}
+.ib[disabled]{opacity:.25;cursor:default}
+.state{padding:40px 16px;text-align:center;color:var(--mut)}
+.more{text-align:center;color:var(--dim);font-size:11px;padding:10px;min-height:24px}
+
+.selbar{position:fixed;left:0;right:0;bottom:0;z-index:40;background:#000;border-top:1px solid var(--line);padding:10px 16px max(10px,env(safe-area-inset-bottom));display:flex;align-items:center;gap:6px;justify-content:center;flex-wrap:wrap}
+.selbar[hidden]{display:none}
+.selbar b{margin-right:auto;font-size:12px}
+.ov{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.6);display:none;place-items:end center}
+.ov.show{display:grid}
+.box{width:min(420px,100%);max-height:80svh;overflow:auto;background:var(--s1);border:1px solid var(--line);border-radius:14px 14px 0 0;padding:14px 14px max(14px,env(safe-area-inset-bottom))}
+@media(min-width:720px){.ov{place-items:center}.box{border-radius:12px}}
+.bt{font-size:14px;font-weight:700;margin-bottom:6px}
+.box p{margin-bottom:4px}
+.box input{width:100%;height:38px;border-radius:6px;background:var(--s2);border:1px solid var(--s3);padding:0 10px;outline:0;margin:8px 0 12px;font-size:14px}
+.box input:focus{border-color:#fff}
+.btns{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
+.b{height:34px;padding:0 16px;border-radius:6px;background:var(--s2);font-weight:600}
+.b.pri{background:#fff;color:#000}
+.it{display:block;width:100%;text-align:left;padding:11px 8px;border-radius:5px;font-size:14px}
+.it:hover{background:var(--s2)}
+.toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translate(-50%,10px);background:#fff;color:#000;padding:8px 14px;border-radius:6px;font-weight:600;font-size:12px;opacity:0;pointer-events:none;transition:.2s;z-index:90;max-width:90vw}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hd"><span class="brand"><i></i>@playlists</span><span class="sub">Manage</span><span class="sp"></span><a class="pill" id="view" href="/" hidden>View playlist</a></header>
+  <div class="state" id="gate">Signing in…</div>
+  <main id="app" hidden>
+    <h1 id="title">Your playlist</h1>
+    <div class="meta num" id="meta"></div>
+    <nav class="chips" id="chips" aria-label="Capsules"></nav>
+    <div class="tb">
+      <label class="search"><svg viewBox="0 0 24 24"><path d="M10 3a7 7 0 015.5 11.3l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1110 3zm0 2a5 5 0 100 10 5 5 0 000-10z"/></svg><input type="search" id="q" placeholder="Search" aria-label="Search songs"></label>
+      <span class="sp"></span>
+      <span class="tools" id="capTools" hidden><button class="pill" id="bRen">Rename</button><button class="pill" id="bDel">Delete capsule</button></span>
+    </div>
+    <div id="rows"></div>
+    <div class="more" id="more"></div>
+  </main>
+</div>
+<div class="selbar" id="selbar" hidden><b class="num" id="selN"></b><button class="pill pri" id="bAdd">Add to capsule</button><button class="pill" id="bRm">Remove</button><button class="pill" id="bClr">Clear</button></div>
+<div class="ov" id="ov"></div><div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const S = { me: null, user: null, caps: [], scope: 'all', songs: [], q: '', page: 0, pages: 1, total: 0, ver: 0, pending: null, ac: null, failed: false, sel: new Set() };
+  const UP = '<svg viewBox="0 0 24 24"><path d="M12 6l7 7-1.4 1.4L13 9.8V19h-2V9.8l-4.6 4.6L5 13z"/></svg>';
+  const DN = '<svg viewBox="0 0 24 24"><path d="M12 18l-7-7 1.4-1.4L11 14.2V5h2v9.2l4.6-4.6L19 11z"/></svg>';
+  const RM = '<svg viewBox="0 0 24 24"><path d="M6.4 5L12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg>';
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const img = s => s.image_url || s.poster_url || s.cover_url || '';
+  const thumb = s => img(s) ? `<img loading="lazy" src="${esc(img(s))}" alt="">` : '♪';
+  const name = u => [u.first_name, u.last_name].filter(Boolean).join(' ') || (u.username ? '@' + u.username : 'User ' + u.user_id);
+  const H = { 'X-Requested-With': 'playlist', 'Content-Type': 'application/json' };
+
+  // ---- overlay, toast, requests ----
+  const ov = $('ov');
+  const showBox = h => { ov.innerHTML = `<div class="box">${h}</div>`; ov.classList.add('show'); };
+  const hideBox = () => { ov.classList.remove('show'); ov.innerHTML = ''; };
+  ov.addEventListener('click', e => { if (e.target === ov) hideBox(); });
+  let tt; const toast = m => { const e = $('toast'); e.textContent = m; e.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => e.classList.remove('show'), 2600); };
+  const gate = m => { $('gate').textContent = m; $('gate').hidden = false; $('app').hidden = true; $('selbar').hidden = true; };
+  async function api(method, p, body) {
+    const r = await fetch(p, { method, headers: H, body: body ? JSON.stringify(body) : undefined });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 401) { gate('Session expired. Reopen this page from Telegram.'); throw new Error('Session expired'); }
+    if (!r.ok) throw new Error(d.error || 'Request failed');
+    return d;
+  }
+  const getJson = async (u, signal) => { const r = await fetch(u, { headers: { Accept: 'application/json' }, signal }); if (!r.ok) throw new Error(r.status === 404 ? 'Not found' : 'Failed to load (' + r.status + ')'); return r.json(); };
+  const guard = fn => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message); } };
+  function ask(title, { value = null, ok = 'Save', note = '' } = {}) {   // text prompt (value !== null) or confirm
+    return new Promise(res => {
+      showBox(`<h3 class="bt">${esc(title)}</h3>${note ? `<p class="a">${esc(note)}</p>` : ''}${value !== null ? `<input id="mi" maxlength="40" value="${esc(value)}" autocomplete="off">` : ''}<div class="btns"><button class="b" id="mc">Cancel</button><button class="b pri" id="mo">${esc(ok)}</button></div>`);
+      const i = $('mi'); if (i) { i.focus(); i.select(); i.addEventListener('keydown', e => e.key === 'Enter' && $('mo').click()); }
+      const done = v => { hideBox(); res(v); };
+      $('mc').onclick = () => done(null); $('mo').onclick = () => done(i ? i.value.trim() || null : true);
+    });
+  }
+
+  // ---- sign-in: Telegram initData -> /auth/tg (HttpOnly JWT cookie, only sent to /me/*) ----
+  async function signIn() {
+    try {
+      const tg = window.Telegram && Telegram.WebApp;
+      if (tg && tg.initData) { tg.ready && tg.ready(); tg.expand && tg.expand();
+        const r = await fetch('/auth/tg', { method: 'POST', headers: H, body: JSON.stringify({ initData: tg.initData }) });
+        if (r.ok) S.me = (await r.json()).user_id; }
+      if (S.me == null) { const r = await fetch('/me'); if (r.ok) S.me = (await r.json()).user_id; }
+    } catch {}
+    return S.me != null;
+  }
+
+  // ---- capsules ----
+  const total = () => S.user ? S.user.song_count || 0 : 0;
+  async function loadCaps() {
+    const d = await getJson(`/playlist/${S.me}/capsules`); S.user = d.user; S.caps = d.capsules.filter(c => c.id !== 'all');
+    S.allCount = d.capsules[0] ? d.capsules[0].count : total();
+  }
+  function renderChips() {
+    const cur = S.scope;
+    $('chips').innerHTML = `<button class="chip${cur === 'all' ? ' on' : ''}" data-s="all">All<small class="num">${S.allCount}</small></button>` +
+      S.caps.map(c => `<button class="chip${cur === c.id ? ' on' : ''}" data-s="${esc(c.id)}">${esc(c.name)}<small class="num">${c.count}</small></button>`).join('') +
+      '<button class="chip add" data-s="+">+ New capsule</button>';
+    $('capTools').hidden = cur === 'all';
+    const n = S.user ? name(S.user) : '';
+    $('title').textContent = cur === 'all' ? 'All songs' : (S.caps.find(c => c.id === cur) || {}).name || '';
+    $('meta').textContent = n + (S.user && S.user.username ? ' · @' + S.user.username : '');
+  }
+  $('chips').addEventListener('click', guard(async e => {
+    const b = e.target.closest('[data-s]'); if (!b) return;
+    if (b.dataset.s === '+') {
+      const n = await ask('New capsule', { value: '', ok: 'Create' }); if (!n) return;
+      const c = await api('POST', '/me/capsules', { name: n }); await loadCaps(); return select(c.id);
+    }
+    select(b.dataset.s);
+  }));
+  $('bRen').onclick = guard(async () => {
+    const cur = S.caps.find(c => c.id === S.scope); const n = await ask('Rename capsule', { value: cur ? cur.name : '' }); if (!n) return;
+    await api('PATCH', `/me/capsules/${S.scope}`, { name: n }); await loadCaps(); renderChips(); toast('Renamed');
+  });
+  $('bDel').onclick = guard(async () => {
+    if (!(await ask('Delete this capsule?', { ok: 'Delete', note: 'The songs stay in All.' }))) return;
+    await api('DELETE', `/me/capsules/${S.scope}`); await loadCaps(); select('all'); toast('Capsule deleted');
+  });
+
+  // ---- songs (server-side search + paging) ----
+  const url = p => `/playlist/${S.me}?format=json&page=${p}&q=${encodeURIComponent(S.q)}&capsule=${encodeURIComponent(S.scope)}`;
+  function load(reset) {
+    if (reset) { S.ver++; S.ac && S.ac.abort(); S.pending = null; S.failed = false; S.songs = []; S.page = 0; S.pages = 1; S.total = 0;
+      $('rows').innerHTML = '<div class="state">Loading…</div>'; $('more').textContent = ''; }
+    if (S.pending) return S.pending;
+    if (S.page >= S.pages) return Promise.resolve();
+    const ver = S.ver; S.ac = new AbortController();
+    $('more').textContent = S.page ? 'Loading more…' : '';
+    S.pending = getJson(url(S.page + 1), S.ac.signal).then(d => {
+      if (ver !== S.ver) return;
+      S.page = d.page; S.pages = d.pages || 1; S.total = d.total; S.songs.push(...d.songs); S.pending = null; $('more').textContent = '';
+      renderRows(); maybeMore();
+    }).catch(e => { if (ver !== S.ver || e.name === 'AbortError') return; S.pending = null; S.failed = true;
+      if (!S.songs.length) $('rows').innerHTML = `<div class="state">${esc(e.message)}</div>`; else $('more').textContent = 'Could not load more. Tap to retry'; });
+    return S.pending;
+  }
+  const maybeMore = () => { if (!S.failed && !S.pending && S.page < S.pages && $('more').getBoundingClientRect().top < innerHeight + 500) load(); };
+  new IntersectionObserver(es => es[0].isIntersecting && maybeMore(), { rootMargin: '500px' }).observe($('more'));
+  $('more').onclick = () => { if (S.failed) { S.failed = false; load(); } };
+  function select(scope) { S.scope = scope; S.q = ''; $('q').value = ''; S.sel.clear(); renderChips(); renderSel(); load(true); }
+  let qt; $('q').addEventListener('input', e => { clearTimeout(qt); qt = setTimeout(() => { const v = e.target.value.trim(); if (v !== S.q) { S.q = v; S.sel.clear(); renderSel(); load(true); } }, 280); });
+
+  function renderRows() {
+    const can = !S.q;   // custom order only makes sense in the full, unfiltered list
+    $('rows').innerHTML = S.songs.length ? S.songs.map((s, i) => `<div class="r${S.sel.has(s.song_id) ? ' sel' : ''}" data-id="${esc(s.song_id)}">
+      <label class="ck"><input type="checkbox" data-ck ${S.sel.has(s.song_id) ? 'checked' : ''} aria-label="Select"></label>
+      <span class="th">${thumb(s)}</span>
+      <span style="min-width:0"><div class="t ell">${esc(s.title || 'Unknown')}</div><div class="a ell">${esc(s.artist || 'Unknown artist')}</div></span>
+      <span class="ac"><button class="ib" data-up aria-label="Move up" ${can && i > 0 ? '' : 'disabled'}>${UP}</button><button class="ib" data-dn aria-label="Move down" ${can && i < S.songs.length - 1 ? '' : 'disabled'}>${DN}</button><button class="ib" data-x aria-label="${S.scope === 'all' ? 'Delete' : 'Remove from capsule'}">${RM}</button></span></div>`).join('')
+      : `<div class="state">${S.q ? 'No songs match “' + esc(S.q) + '”' : S.scope === 'all' ? 'No songs yet' : 'Empty capsule. Select songs in All and add them here.'}</div>`;
+  }
+  function renderSel() {
+    const n = S.sel.size; $('selbar').hidden = !n;
+    $('selN').textContent = n + ' selected'; $('bRm').textContent = S.scope === 'all' ? 'Delete' : 'Remove from capsule';
+  }
+  const drop = (ids, deleted) => { const set = new Set(ids); S.songs = S.songs.filter(s => !set.has(s.song_id)); ids.forEach(i => S.sel.delete(i)); S.total -= ids.length;
+    if (deleted && S.user) S.user.song_count -= ids.length; };
+  const refreshCaps = async () => { await loadCaps(); renderChips(); };
+
+  $('rows').addEventListener('click', guard(async e => {
+    const row = e.target.closest('.r'); if (!row) return; const id = row.dataset.id, i = S.songs.findIndex(s => s.song_id === id);
+    if (e.target.closest('[data-ck]')) { e.target.checked ? S.sel.add(id) : S.sel.delete(id); row.classList.toggle('sel', S.sel.has(id)); return renderSel(); }
+    const mv = async (body, to) => { await api('PATCH', `/me/capsules/${S.scope}/songs/${id}/move`, body); const [s] = S.songs.splice(i, 1); S.songs.splice(to, 0, s); renderRows(); };
+    if (e.target.closest('[data-up]') && i > 0) return mv({ before: S.songs[i - 1].song_id }, i - 1);
+    if (e.target.closest('[data-dn]') && i < S.songs.length - 1) return mv({ after: S.songs[i + 1].song_id }, i + 1);
+    if (e.target.closest('[data-x]')) await removeSongs([id]);
+  }));
+
+  async function removeSongs(ids) {
+    const all = S.scope === 'all';
+    if (all && !(await ask(ids.length > 1 ? `Delete ${ids.length} songs?` : 'Delete this song?', { ok: 'Delete', note: 'Removes them from your playlist and every capsule.' }))) return;
+    let n = 0;
+    try { for (const id of ids) { await api('DELETE', `/me/capsules/${S.scope}/songs/${id}`); n++; drop([id], all); } }
+    finally { renderRows(); renderSel(); await refreshCaps(); if (n) toast(all ? `Deleted ${n}` : `Removed ${n} from capsule`); }
+  }
+  $('bRm').onclick = guard(() => removeSongs([...S.sel]));
+  $('bClr').onclick = () => { S.sel.clear(); renderRows(); renderSel(); };
+  $('bAdd').onclick = () => {
+    const cs = S.caps.filter(c => c.id !== S.scope), ids = [...S.sel];
+    showBox(`<h3 class="bt">Add ${ids.length} to capsule</h3>` + cs.map((c, i) => `<button class="it" data-c="${i}">${esc(c.name)}</button>`).join('') + '<button class="it" data-c="new">New capsule…</button>');
+    ov.querySelectorAll('[data-c]').forEach(b => b.onclick = guard(async () => { hideBox(); let c = cs[b.dataset.c];
+      if (b.dataset.c === 'new') { const n = await ask('New capsule', { value: '', ok: 'Create' }); if (!n) return; c = await api('POST', '/me/capsules', { name: n }); }
+      let added = 0; for (let k = 0; k < ids.length; k += 200) added += (await api('POST', `/me/capsules/${c.id}/songs`, { song_ids: ids.slice(k, k + 200) })).added;
+      S.sel.clear(); renderRows(); renderSel(); await refreshCaps();
+      toast(added ? `Added ${added} to ${c.name}` + (added < ids.length ? ` (${ids.length - added} already there)` : '') : 'Already in ' + c.name); }));
+  };
+
+  (async () => {
+    if (!(await signIn())) return gate('Open this page from Telegram: send /manage to the bot in a private chat.');
+    try { await loadCaps(); } catch (e) { return gate(e.message); }
+    $('gate').hidden = true; $('app').hidden = false; $('view').hidden = false; $('view').href = `/playlist/${S.me}`;
+    select('all');
+  })();
+})();
+</script>
+</body>
+</html>
