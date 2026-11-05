@@ -40,7 +40,7 @@ h1{font-size:clamp(26px,7vw,60px);line-height:1.02;font-weight:800;letter-spacin
 
 /* action bar */
 .bar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:6px;padding:10px 0;background:linear-gradient(var(--bg) 85%,transparent)}
-.bigplay{width:46px;height:46px;border-radius:50%;background:#fff;color:#000;display:grid;place-items:center;font-size:18px;transition:transform .12s}
+.bigplay{width:64px;height:38px;border-radius:6px;background:#fff;color:#000;display:grid;place-items:center;font-size:18px;transition:transform .12s}
 .bigplay:hover{transform:scale(1.06)}
 .bigplay:active{transform:scale(.97)}
 .ib{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:17px;color:var(--mut)}
@@ -170,7 +170,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     <span class="sp"></span>
     <label class="search"><svg viewBox="0 0 24 24"><path d="M10 3a7 7 0 015.5 11.3l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1110 3zm0 2a5 5 0 100 10 5 5 0 000-10z"/></svg><input type="search" id="q" placeholder="Search" aria-label="Search songs"></label>
     <select class="sort" id="sort" aria-label="Sort">
-      <option value="def">Default</option><option value="title">Title</option><option value="artist">Artist</option><option value="plays">Most played</option>
+      <option value="def">Default</option><option value="title">Title</option><option value="artist">Artist</option><option value="plays">Most played</option><option value="released">Newest release</option>
     </select>
   </div>
 
@@ -179,7 +179,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
   <section>
     <div class="lh"><span class="r">#</span><span>Title</span><span class="hide-s">Album</span><span class="hide-s r">Plays</span><span class="r">Time</span></div>
     <div id="rows"><div class="state">Loading tracks…</div></div>
-    <div class="more" id="more"></div>
+    <div class="more" id="more" style="min-height:24px"></div>
   </section>
 </main>
 
@@ -218,7 +218,9 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
 (() => {
   const $ = id => document.getElementById(id), audio = $('audio');
   const uid = location.pathname.replace(/\/+$/, '').split('/').pop();
-  const S = { songs: [], user: null, cur: -1, queue: [], shuffle: false, repeat: 0, filter: '', sort: 'def' };
+  // songs = what the server returned for the current search/sort (paged); top = most-played shelf; now = playing song
+  const S = { songs: [], top: [], user: null, stats: null, arts: null, now: null, queue: [], qMore: false, qVer: 0,
+    shuffle: false, repeat: 0, q: '', sort: 'def', page: 0, pages: 1, total: 0, ver: 0, pending: null, failed: false, ac: null };
 
   const ICON = {
     play: '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>',
@@ -234,94 +236,115 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
   const name = u => [u.first_name, u.last_name].filter(Boolean).join(' ') || (u.username ? '@' + u.username : 'User ' + u.user_id);
   const fill = el => el.style.setProperty('--p', (el.value / el.max * 100) + '%');
   const thumb = s => img(s) ? `<img loading="lazy" src="${esc(img(s))}" alt="">` : '♪';
-  const playing = () => !audio.paused;
+  const isCur = s => S.now && S.now.song_id === s.song_id;
+  const byId = id => S.songs.find(s => s.song_id === id) || S.top.find(s => s.song_id === id);
+  const day = d => { const t = new Date(d + 'T00:00:00'); return isNaN(t) ? d : t.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); };
 
-  async function loadAll() {
-    let page = 1, pages = 1, total = 0;
-    do {
-      const r = await fetch(`/playlist/${encodeURIComponent(uid)}?format=json&page=${page}`, { headers: { Accept: 'application/json' } });
-      if (!r.ok) throw new Error(r.status === 404 ? 'User not found' : 'Failed to load (' + r.status + ')');
-      const d = await r.json();
-      if (page === 1) S.user = d.user;
-      pages = d.pages || 1; total = d.total;
+  // ---- loading: search, sort and paging all happen on the server ----
+  const url = (page, extra = '') => `/playlist/${encodeURIComponent(uid)}?format=json&page=${page}&sort=${S.sort}&q=${encodeURIComponent(S.q)}${extra}`;
+  async function getJson(u, signal) {
+    const r = await fetch(u, { headers: { Accept: 'application/json' }, signal });
+    if (!r.ok) throw new Error(r.status === 404 ? 'User not found' : 'Failed to load (' + r.status + ')');
+    return r.json();
+  }
+  function load(reset) {
+    if (reset) {
+      S.ver++; S.ac?.abort(); S.ac = null; S.pending = null; S.failed = false;
+      S.songs = []; S.page = 0; S.pages = 1; S.total = 0;
+      $('rows').innerHTML = '<div class="state">Loading…</div>'; $('more').textContent = '';
+    }
+    if (S.pending) return S.pending;
+    if (S.page >= S.pages) return Promise.resolve();
+    const ver = S.ver; S.ac = new AbortController();
+    $('more').textContent = S.page ? 'Loading more…' : '';
+    const p = getJson(url(S.page + 1), S.ac.signal).then(d => {
+      if (ver !== S.ver) return;
+      S.page = d.page; S.pages = d.pages || 1; S.total = d.total;
+      if (d.user) S.user = d.user;
+      if (d.stats) S.stats = d.stats;
+      if (!S.arts) S.arts = d.songs.map(img).filter(Boolean).slice(0, 4);
       S.songs.push(...d.songs);
-      renderUser(); renderList(); renderShelf();
-      $('more').textContent = page < pages ? `Loading ${S.songs.length} / ${total}` : '';
-      page++;
-    } while (page <= pages);
-    $('more').textContent = '';
+      S.pending = null; $('more').textContent = '';
+      renderUser(); renderList(); renderShelf(); maybeMore();
+    }).catch(e => {
+      if (ver !== S.ver || e.name === 'AbortError') return;
+      S.pending = null; S.failed = true;
+      if (!S.songs.length) { $('uname').textContent = S.user ? $('uname').textContent : 'Error'; $('rows').innerHTML = `<div class="state err">${esc(e.message)}</div>`; }
+      else $('more').textContent = 'Could not load more. Tap to retry';
+    });
+    S.pending = p; return p;
+  }
+  const maybeMore = () => { if (!S.failed && !S.pending && S.page < S.pages && $('more').getBoundingClientRect().top < innerHeight + 500) load(); };
+  new IntersectionObserver(es => es[0].isIntersecting && maybeMore(), { rootMargin: '500px' }).observe($('more'));
+  $('more').onclick = () => { if (S.failed) { S.failed = false; load(); } };
+
+  async function loadTop() { // most played shelf: its own request, since the list is paged
+    try { const d = await getJson(`/playlist/${encodeURIComponent(uid)}?format=json&sort=plays&limit=8`);
+      S.top = d.songs.filter(s => ok(s) && s.listens > 0); renderShelf(); } catch {}
   }
 
   function renderUser() {
     const u = S.user; if (!u) return;
-    const n = name(u);
+    const n = name(u), st = S.stats || {};
     $('uname').textContent = n; document.title = n + "'s playlist · @playlists";
-    const listens = S.songs.reduce((a, s) => a + (s.listens || 0), 0);
-    const secs = S.songs.reduce((a, s) => a + (s.duration || 0), 0);
+    const secs = st.duration || 0, count = st.songs ?? u.song_count ?? S.total;
     const dur = secs >= 3600 ? Math.floor(secs / 3600) + ' hr ' + Math.round(secs % 3600 / 60) + ' min' : Math.round(secs / 60) + ' min';
-    const count = u.song_count || S.songs.length;
     $('sub').innerHTML = `<span class="av">${esc((n.replace('@', '')[0] || '?').toUpperCase())}</span><b>${u.username ? '@' + esc(u.username) : esc(n)}</b>` +
-      `<span class="dot"></span><span class="num">${count} songs</span><span class="dot"></span><span class="num">${listens} plays</span>` +
+      `<span class="dot"></span><span class="num">${count} songs</span><span class="dot"></span><span class="num">${st.listens || 0} plays</span>` +
       (secs ? `<span class="dot"></span><span class="num">${dur}</span>` : '');
-    const arts = S.songs.map(img).filter(Boolean);
-    const c = $('cover');
-    if (arts.length >= 4) { c.className = 'cover m4'; c.innerHTML = arts.slice(0, 4).map(a => `<img src="${esc(a)}" alt="">`).join(''); }
+    const arts = S.arts || [], c = $('cover');
+    if (arts.length >= 4) { c.className = 'cover m4'; c.innerHTML = arts.map(a => `<img src="${esc(a)}" alt="">`).join(''); }
     else if (arts.length) { c.className = 'cover'; c.innerHTML = `<img src="${esc(arts[0])}" alt="">`; }
     else { c.className = 'cover'; c.innerHTML = `<span class="ini">${esc((n.replace('@', '')[0] || '?').toUpperCase())}</span>`; }
   }
 
-  // visible (filtered + sorted) list of song indexes
-  const view = () => {
-    const q = S.filter.trim().toLowerCase();
-    let a = S.songs.map((s, i) => i).filter(i => { const s = S.songs[i]; return !q || [s.title, s.artist, s.album, s.genre].some(v => (Array.isArray(v) ? v.join(' ') : v || '').toLowerCase().includes(q)); });
-    const g = i => S.songs[i], by = f => (x, y) => String(f(g(x)) || '').localeCompare(String(f(g(y)) || ''), undefined, { sensitivity: 'base' });
-    if (S.sort === 'title') a.sort(by(s => s.title)); else if (S.sort === 'artist') a.sort(by(s => s.artist));
-    else if (S.sort === 'plays') a.sort((x, y) => (g(y).listens || 0) - (g(x).listens || 0));
-    return a;
-  };
-
   function renderList() {
-    const v = view(), go = playing();
-    $('rows').innerHTML = v.length ? v.map((i, k) => { const s = S.songs[i], cur = i === S.cur;
-      return `<button class="row${cur ? ' cur' : ''}${ok(s) ? '' : ' dead'}" data-i="${i}">
+    const go = !audio.paused;
+    $('rows').innerHTML = S.songs.length ? S.songs.map((s, k) => { const cur = isCur(s);
+      return `<button class="row${cur ? ' cur' : ''}${ok(s) ? '' : ' dead'}" data-id="${esc(s.song_id)}">
         <span class="n num">${cur ? `<i class="eq${go ? ' go' : ''}"><b></b><b></b><b></b></i>` : `<span>${k + 1}</span>`}<i class="pi">${cur && go ? ICON.pause : ICON.play}</i></span>
         <span class="tr"><span class="th">${thumb(s)}</span><span class="tt"><div class="t ell">${esc(s.title || 'Unknown')}</div><div class="a ell">${esc(s.artist || 'Unknown artist')}</div></span></span>
         <span class="hide-s ell a">${esc(s.album || '')}</span><span class="hide-s r num">${s.listens || 0}</span>
         <span class="r num">${s.uploaded ? fmt(s.duration) : 'n/a'}</span></button>`; }).join('')
-      : `<div class="state">${S.songs.length ? 'No songs match your search' : 'No songs yet'}</div>`;
+      : (S.pending || (!S.page && !S.failed)) ? '<div class="state">Loading…</div>'
+      : `<div class="state">${S.q ? 'No songs match “' + esc(S.q) + '”' : 'No songs yet'}</div>`;
   }
-
   function renderShelf() {
-    const top = S.songs.map((s, i) => i).filter(i => ok(S.songs[i]) && S.songs[i].listens > 0).sort((a, b) => S.songs[b].listens - S.songs[a].listens).slice(0, 8);
-    const show = S.songs.length >= 8 && top.length >= 3 && !S.filter;
+    const show = S.top.length >= 3 && (S.stats?.songs || 0) >= 8 && !S.q;
     $('shelf').hidden = !show; if (!show) return;
-    $('cards').innerHTML = top.map(i => { const s = S.songs[i];
-      return `<button class="card${i === S.cur ? ' cur' : ''}" data-i="${i}"><div class="ph">${thumb(s)}</div><div class="t ell">${esc(s.title)}</div><div class="a ell">${esc(s.artist || 'Unknown artist')}</div></button>`; }).join('');
+    $('cards').innerHTML = S.top.map(s => `<button class="card${isCur(s) ? ' cur' : ''}" data-id="${esc(s.song_id)}"><div class="ph">${thumb(s)}</div><div class="t ell">${esc(s.title)}</div><div class="a ell">${esc(s.artist || 'Unknown artist')}</div></button>`).join('');
   }
   const refresh = () => { renderList(); renderShelf(); };
 
-  const pick = e => { const b = e.target.closest('[data-i]'); if (!b) return; const i = +b.dataset.i; if (!ok(S.songs[i])) return;
-    if (i === S.cur) return toggle(); buildQueue(i); play(i); };
-  $('rows').addEventListener('click', pick); $('cards').addEventListener('click', pick);
-  $('q').addEventListener('input', e => { S.filter = e.target.value; refresh(); });
-  $('sort').addEventListener('change', e => { S.sort = e.target.value; refresh(); });
+  const pick = (e, list) => { const b = e.target.closest('[data-id]'); if (!b) return; const s = byId(b.dataset.id); if (!ok(s)) return;
+    if (isCur(s)) return toggle(); buildQueue(s, list()); play(s); };
+  $('rows').addEventListener('click', e => pick(e, () => S.songs));
+  $('cards').addEventListener('click', e => pick(e, () => S.top));
 
-  function buildQueue(first) {
-    const idx = view().filter(i => ok(S.songs[i]));
-    if (S.shuffle) { for (let i = idx.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [idx[i], idx[j]] = [idx[j], idx[i]]; }
-      const k = idx.indexOf(first); if (k > 0) [idx[0], idx[k]] = [idx[k], idx[0]]; }
-    S.queue = idx;
+  let t; $('q').addEventListener('input', e => { clearTimeout(t); t = setTimeout(() => { const v = e.target.value.trim(); if (v !== S.q) { S.q = v; load(true); renderShelf(); } }, 280); });
+  $('sort').addEventListener('change', e => { S.sort = e.target.value; load(true); });
+
+  // ---- queue: built from the loaded songs; pulls the next page from the server when it runs out ----
+  function buildQueue(first, list = S.songs) {
+    const a = list.filter(ok);
+    if (S.shuffle) { for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; }
+      const k = a.findIndex(s => first && s.song_id === first.song_id); if (k > 0) [a[0], a[k]] = [a[k], a[0]]; }
+    S.queue = a; S.qMore = list === S.songs; S.qVer = S.ver;
   }
-  function step(d) {
-    if (!S.queue.length) buildQueue(S.cur);
-    let p = S.queue.indexOf(S.cur) + d;
-    if (p >= S.queue.length) { if (S.repeat === 1 || S.shuffle) { if (S.shuffle) buildQueue(); p = 0; } else { audio.pause(); return; } }
+  async function step(d) {
+    if (!S.queue.length) buildQueue(S.now);
+    let p = S.queue.findIndex(s => isCur(s)) + d;
+    if (p >= S.queue.length && S.qMore && S.qVer === S.ver && S.page < S.pages) {
+      const before = S.songs.length; await load();
+      if (S.qVer === S.ver) S.queue.push(...S.songs.slice(before).filter(ok));
+    }
+    if (p >= S.queue.length) { if (S.repeat === 1 || S.shuffle) { if (S.shuffle) buildQueue(null); p = 0; } else { audio.pause(); return; } }
     if (p < 0) p = S.queue.length - 1;
-    play(S.queue[p]);
+    if (S.queue[p]) play(S.queue[p]);
   }
-  function play(i) {
-    const s = S.songs[i]; if (!ok(s)) return;
-    S.cur = i; S.counted = null; S.tried = false;
+  function play(s) {
+    if (!ok(s)) return;
+    S.now = s; S.counted = null; S.tried = false;
     audio.src = s.hf_url || s.listen_url;
     audio.play().catch(() => {});
     $('npT').textContent = s.title || 'Unknown'; $('npA').textContent = s.artist || 'Unknown artist';
@@ -329,33 +352,32 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     $('seek').value = 0; fill($('seek')); $('tCur').textContent = '0:00'; $('tDur').textContent = fmt(s.duration);
     info(s); refresh(); media(s);
   }
-  const first = () => { const f = view().find(i => ok(S.songs[i])); if (f !== undefined) { buildQueue(f); play(f); } };
-  const toggle = () => { if (S.cur < 0) return first(); audio.paused ? audio.play() : audio.pause(); };
+  const first = () => { const f = S.songs.find(ok); if (f) { buildQueue(f); play(f); } };
+  const toggle = () => { if (!S.now) return first(); audio.paused ? audio.play() : audio.pause(); };
 
-  const setShuf = () => { ['bShuffle', 'pShuffle'].forEach(id => $(id).classList.toggle('on', S.shuffle)); };
-  const doShuf = () => { S.shuffle = !S.shuffle; setShuf(); buildQueue(S.cur); };
+  const setShuf = () => ['bShuffle', 'pShuffle'].forEach(id => $(id).classList.toggle('on', S.shuffle));
+  const doShuf = () => { S.shuffle = !S.shuffle; setShuf(); buildQueue(S.now); };
   $('bShuffle').onclick = doShuf; $('pShuffle').onclick = doShuf;
-  $('bAll').onclick = first; $('bPlay').onclick = toggle; $('bNext').onclick = () => step(1);
+  $('bAll').onclick = toggle; $('bPlay').onclick = toggle; $('bNext').onclick = () => step(1);
   $('bPrev').onclick = () => audio.currentTime > 3 ? (audio.currentTime = 0) : step(-1);
   $('bRepeat').onclick = e => { S.repeat = (S.repeat + 1) % 3; e.currentTarget.classList.toggle('on', S.repeat > 0); e.currentTarget.innerHTML = S.repeat === 2 ? ICON.rep1 : ICON.rep; };
   $('pShuffle').innerHTML = ICON.shuf; $('bShuffle').innerHTML = ICON.shuf; $('bRepeat').innerHTML = ICON.rep;
   $('vol').addEventListener('input', e => { audio.volume = e.target.value / 100; fill(e.target); }); fill($('vol'));
 
-  const syncPlay = () => { $('bPlay').innerHTML = audio.paused ? ICON.play : ICON.pause; $('bAll').innerHTML = audio.paused ? ICON.play : ICON.pause; renderList(); };
+  const syncPlay = () => { $('bPlay').innerHTML = $('bAll').innerHTML = audio.paused ? ICON.play : ICON.pause; renderList(); };
   syncPlay();
-  $('bAll').onclick = () => S.cur < 0 ? first() : toggle();
   audio.addEventListener('ended', () => S.repeat === 2 ? (audio.currentTime = 0, audio.play()) : step(1));
   ['play', 'pause'].forEach(ev => audio.addEventListener(ev, syncPlay));
   audio.addEventListener('playing', () => {
-    const s = S.songs[S.cur]; if (!s) return;
+    const s = S.now; if (!s) return;
     $('npA').textContent = s.artist || 'Unknown artist';
     if (S.counted === s.song_id) return;
     S.counted = s.song_id;
-    if (s.listen_url) fetch(s.listen_url, { method: 'POST', keepalive: true }).then(() => fresh(s)).catch(() => {});
+    if (s.listen_url) fetch(s.listen_url, { method: 'POST', keepalive: true }).then(r => r.json()).then(j => { if (j.counted && S.stats) S.stats.listens++; fresh(s); }).catch(() => {});
   });
-  audio.addEventListener('waiting', () => { if (S.cur >= 0) $('npA').textContent = 'Buffering…'; });
+  audio.addEventListener('waiting', () => { if (S.now) $('npA').textContent = 'Buffering…'; });
   audio.addEventListener('error', () => {
-    const s = S.songs[S.cur]; if (!s) return;
+    const s = S.now; if (!s) return;
     if (!S.tried && s.hf_url && s.listen_url) { S.tried = true; audio.src = s.listen_url; audio.play().catch(() => {}); return; }
     $('npA').textContent = 'Could not play this file';
   });
@@ -370,8 +392,9 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
   fill($('seek'));
 
   function info(s) {
-    const rows = [['Album', s.album], ['Album artist', s.album_artist], ['Year', s.year],
-      ['Genre', Array.isArray(s.genre) ? s.genre.join(', ') : s.genre], ['Track', s.track_no], ['Duration', s.duration && fmt(s.duration)],
+    const rows = [['Album', s.album], ['Album artist', s.album_artist], ['Released', s.release_date && day(s.release_date)], ['Year', !s.release_date && s.year],
+      ['Genre', Array.isArray(s.genre) ? s.genre.join(', ') : s.genre], ['Label', s.label], ['Explicit', s.explicit ? 'Yes' : null],
+      ['Track', s.track_no], ['Duration', s.duration && fmt(s.duration)],
       ['Format', s.codec || s.mime_type], ['Bitrate', s.bitrate && Math.round(s.bitrate / 1000) + ' kbps'],
       ['Sample rate', s.sample_rate && (s.sample_rate / 1000).toFixed(1) + ' kHz'], ['Size', s.file_size && (s.file_size / 1048576).toFixed(2) + ' MB'],
       ['Plays', `<span id="live">${s.listens || 0}</span>`, 1],
@@ -385,7 +408,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
   async function fresh(s) {
     if (!s.info_url) return;
     try { await new Promise(r => setTimeout(r, 1500)); const d = await (await fetch(s.info_url)).json();
-      s.listens = d.listens ?? s.listens; if (S.songs[S.cur] === s && $('live')) $('live').textContent = s.listens; renderUser(); refresh(); } catch {}
+      s.listens = d.listens ?? s.listens; if (isCur(s) && $('live')) $('live').textContent = s.listens; renderUser(); refresh(); } catch {}
   }
   function media(s) {
     if (!('mediaSession' in navigator)) return;
@@ -394,8 +417,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
       .forEach(([a, f]) => navigator.mediaSession.setActionHandler(a, f));
   }
 
-  // info drawer
-  const drawer = open => { if (open && S.cur < 0) return; $('dwrap').classList.toggle('open', open); };
+  const drawer = open => { if (open && !S.now) return; $('dwrap').classList.toggle('open', open); };
   $('nowBtn').onclick = () => drawer(true); $('bInfo').onclick = () => drawer(!$('dwrap').classList.contains('open'));
   $('dClose').onclick = $('scrim').onclick = () => drawer(false);
 
@@ -404,7 +426,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     if (/input|textarea|select/i.test(e.target.tagName)) return;
     if (e.code === 'Space') { e.preventDefault(); toggle(); } else if (e.shiftKey && e.code === 'ArrowRight') step(1); else if (e.shiftKey && e.code === 'ArrowLeft') step(-1); });
 
-  loadAll().catch(e => { $('uname').textContent = 'Error'; $('rows').innerHTML = `<div class="state err">${esc(e.message)}</div>`; });
+  load(true); loadTop();
 })();
 </script>
 </body>
