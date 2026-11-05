@@ -656,8 +656,23 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     if (PG.acc >= 15) flushPing();
   });
   ['pause', 'ended', 'seeking'].forEach(ev => audio.addEventListener(ev, () => { flushPing(); PG.last = null; }));
-  addEventListener('pagehide', () => flushPing(true));
+  addEventListener('pagehide', () => { flushPing(true); presence('stopped'); });
   document.addEventListener('visibilitychange', () => { if (document.hidden) flushPing(true); });
+
+  // "now playing" for /status: tells the server which Telegram user is listening to what. Works for any way the Mini App was opened
+  // (group link, DM button, direct link) because it relies on Telegram's signed initData, not on the chat. Outside Telegram there is no identity, so nothing is sent.
+  const TG_INIT = (window.Telegram && Telegram.WebApp && Telegram.WebApp.initData) || '';
+  let hbAt = 0;
+  function presence(state) {
+    if (PREVIEW || !TG_INIT) return;
+    const id = S.now && S.now.song_id; if (!id) return;
+    hbAt = Date.now();
+    fetch('/nowplaying', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+      body: JSON.stringify({ initData: TG_INIT, song_id: id, state, at: Date.now() }) }).catch(() => {});
+  }
+  audio.addEventListener('playing', () => presence('playing'));
+  ['pause', 'ended'].forEach(ev => audio.addEventListener(ev, () => presence('stopped')));
+  audio.addEventListener('timeupdate', () => { if (!audio.paused && Date.now() - hbAt > 20000) presence('playing'); });   // heartbeat, the server expires it after 60s
   audio.addEventListener('waiting', () => { if (S.now) $('npA').textContent = 'Buffering…'; });
   audio.addEventListener('error', () => {
     const s = S.now; if (!s) return;
@@ -744,4 +759,5 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
 })();
 </script>
 </body>
+</html>
 </html>
