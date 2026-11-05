@@ -465,13 +465,18 @@ function getAudio(msg) {
 }
 
 // ---------- core ----------
-async function processAudio(ctx, a) {
-  const { from, chat, message_id } = ctx.message;
+async function processAudio(ctx, a, msg = ctx.message, manual = false) {
+  const { from, chat, message_id } = msg;
 
   const t0 = Date.now();
   log(`start msg=${message_id} chat=${chat.id} "${chat.title || chat.type}" user=${who(from)} file="${a.file_name || a.title || '?'}" size=${mb(a.file_size)} mime=${a.mime_type || '?'}`);
   if (a.file_size && a.file_size > 20 * 1024 * 1024) log('WARN file > 20MB, Telegram Bot API cannot download it');
-  if (await songs.findOne({ file_unique_id: a.file_unique_id, chat_id: chat.id })) { log(`skip duplicate file_unique_id=${a.file_unique_id} in chat=${chat.id}`); return; }
+  const dupe = await songs.findOne({ file_unique_id: a.file_unique_id, chat_id: chat.id });
+  if (dupe) {
+    log(`skip duplicate file_unique_id=${a.file_unique_id} in chat=${chat.id} (song_id=${dupe.song_id})`);
+    if (manual) await ctx.reply(`Already saved in this chat: ${dupe.title || 'song'} (id ${dupe.song_id}, uploaded=${dupe.uploaded})`, { reply_parameters: { message_id } }).catch(() => {});
+    return;
+  }
 
   const song = {
     chat_id: chat.id,
@@ -597,6 +602,27 @@ bot.command('top', async ctx => {
 bot.command('me', async ctx => {
   const u = await users.findOne({ _id: ctx.from.id });
   ctx.reply(`You've shared ${u?.song_count || 0} songs.`);
+});
+
+// /upload - owner only. Reply to an audio file with /upload to force-process it.
+// Commands are always delivered to bots (even with privacy mode on), so this also tells you whether the bot sees the group.
+const UPLOAD_ADMIN_ID = Number(process.env.UPLOAD_ADMIN_ID || 8955269933);
+bot.command('upload', async ctx => {
+  const m = ctx.message;
+  log(`/upload command chat=${m.chat.id} (${m.chat.type}) from=${who(ctx.from)} reply=${!!m.reply_to_message}`);
+  if (ctx.from.id !== UPLOAD_ADMIN_ID) { log(`/upload denied for ${who(ctx.from)}`); return; }
+
+  const target = m.reply_to_message;
+  const a = target && getAudio(target);
+  if (!a) {
+    return ctx.reply(`Reply to an audio file with /upload.\nchat: ${m.chat.id} (${m.chat.type})\nI can see this command, so the bot is receiving updates here.`,
+      { reply_parameters: { message_id: m.message_id } }).catch(() => {});
+  }
+  if (!target.from || target.from.is_bot) return ctx.reply('That audio was sent by a bot, nothing to attribute it to.').catch(() => {});
+
+  await ctx.reply('Processing…', { reply_parameters: { message_id: target.message_id } }).catch(() => {});
+  queue(() => processAudio(ctx, a, { from: target.from, chat: m.chat, message_id: target.message_id }, true))
+    .catch(e => console.error(`[${new Date().toISOString()}] [audio] /upload error:`, e));
 });
 
 bot.on('message', (ctx, next) => {
