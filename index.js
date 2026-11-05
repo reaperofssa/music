@@ -16,7 +16,7 @@ const log = (...a) => console.log(`[${new Date().toISOString()}] [audio]`, ...a)
 const who = u => u ? `${u.id}${u.username ? ' @' + u.username : ''}` : '?';
 const mb = n => n ? (n / 1048576).toFixed(2) + 'MB' : '?';
 const bot = new Telegraf(BOT_TOKEN);
-let users, songs, queues, capsules, capSongs, mm, hub, hfFiles, hfSettings;
+let users, songs, queues, capsules, capSongs, jobs, mm, hub, hfFiles, hfSettings;
 
 // ---------- poster (Deezer) ----------
 const L = '\\p{L}\\p{M}\\p{N}';
@@ -65,7 +65,7 @@ async function fetchCover(album) {
   for (const u of [album?.cover_xl, album?.cover_big]) { // 1000x1000, then 500x500
     if (!u || u.includes('/cover//')) continue;          // Deezer's empty-cover placeholder
     try {
-      const r = await fetch(u);
+      const r = await ft(u);
       if (!r.ok) continue;
       const buf = Buffer.from(await r.arrayBuffer());
       if (buf.length > 3000) return buf;
@@ -75,12 +75,13 @@ async function fetchCover(album) {
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const ft = (u, ms = 30000) => fetch(u, { signal: AbortSignal.timeout(ms) });   // fetch that gives up instead of hanging forever
 
 // genres / release date / label live on the album endpoint (search results don't carry them)
 async function fetchAlbumMeta(albumId) {
   if (!albumId) return {};
   try {
-    const r = await fetch(`https://api.deezer.com/album/${albumId}`);
+    const r = await ft(`https://api.deezer.com/album/${albumId}`);
     if (!r.ok) return {};
     const a = await r.json();
     if (a.error) return a.error.code === 4 ? { rateLimited: true } : {};
@@ -97,7 +98,7 @@ async function findPoster({ title, artist, duration }) {
   if (!title) return null;
   const stripBr = x => String(x || '').replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/\s+/g, ' ').trim();
   const q = encodeURIComponent(`${stripBr(title)} ${artist || ''}`.trim());
-  const r = await fetch(`https://api.deezer.com/search?q=${q}&limit=10`);
+  const r = await ft(`https://api.deezer.com/search?q=${q}&limit=10`);
   if (!r.ok) return null;
   const { data = [] } = await r.json();
   const v = pickMatch(data, { title, artist, duration });
@@ -147,7 +148,7 @@ async function backfillDeezer() {
     for (let attempt = 0; attempt < 3; attempt++) {
       let meta = {}, explicit = null;
       try {
-        const r = await fetch(`https://api.deezer.com/track/${s.deezer_id}`);
+        const r = await ft(`https://api.deezer.com/track/${s.deezer_id}`);
         const t = r.ok ? await r.json() : {};
         if (t.error?.code === 4) { await sleep(6000); continue; }   // Deezer quota: ~50 req / 5s
         explicit = t.explicit_lyrics ?? null;
@@ -930,7 +931,80 @@ async function genSongId() {
   }
 }
 
-const queue = (() => { let p = Promise.resolve(); return fn => (p = p.then(fn, fn)); })(); // one job at a time
+// ---------- durable job line ----------
+// Every audio message is written to Mongo (collection "jobs") BEFORE anything is processed, then a single worker takes them one at a time, oldest first.
+// Nothing lives only in memory: a crash/restart, a hung upload or a failed attempt just puts the job back in line. A song is only given up on after JOB_MAX_ATTEMPTS tries,
+// and then the chat is told. A 10s poller is the safety net that also wakes retries and rescues jobs stuck in "processing".
+const JOB_MAX_ATTEMPTS = 4, JOB_TIMEOUT_MS = 10 * 60 * 1000, DAY = 86400000;
+const withTimeout = (p, ms, label) => { let t; return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms); })]).finally(() => clearTimeout(t)); };
+const jobCtx = chat => ({ chat, telegram: bot.telegram, reply: (text, extra) => bot.telegram.sendMessage(chat.id, text, extra) });   // no live update needed, so jobs survive restarts
+let jobSeq = 0, pumping = false, pumpAgain = false;
+
+async function enqueueAudio({ from, chat, message_id }, a, manual = false) {
+  const now = Date.now();
+  const job = {
+    _id: `${chat.id}:${message_id}${manual ? ':m' + now : ''}`,
+    status: 'pending', attempts: 0, manual,
+    order: now * 1000 + (jobSeq++ % 1000),   // arrival order, even for messages that land in the same millisecond
+    created_at: new Date(now), retry_at: new Date(now),
+    a, message_id,
+    from: { id: from.id, first_name: from.first_name || null, last_name: from.last_name || null, username: from.username || null },
+    chat: { id: chat.id, title: chat.title || null, type: chat.type },
+  };
+  for (let i = 0; ; i++) {
+    try { await jobs.insertOne(job); break; }
+    catch (e) {
+      if (e?.code === 11000) { log(`job ${job._id} already in line`); return; }
+      if (i >= 4) throw e;
+      await sleep(500 * 2 ** i);
+    }
+  }
+  log(`job ${job._id} queued (${a.file_name || a.title || a.file_unique_id})`);
+  pump();
+}
+
+async function runJob(job) {
+  const final = job.attempts >= JOB_MAX_ATTEMPTS, ctx = jobCtx(job.chat);
+  log(`job ${job._id} start attempt ${job.attempts}/${JOB_MAX_ATTEMPTS}`);
+  try {
+    await withTimeout(processAudio(ctx, job.a, { from: job.from, chat: job.chat, message_id: job.message_id }, job.manual, final), JOB_TIMEOUT_MS, 'job');
+    await jobs.updateOne({ _id: job._id }, { $set: { status: 'done', done_at: new Date(), expire_at: new Date(Date.now() + 3 * DAY) } });
+    log(`job ${job._id} done`);
+  } catch (e) {
+    const msg = e?.message || String(e);
+    console.error(`[${new Date().toISOString()}] [audio] job ${job._id} attempt ${job.attempts} failed:`, e?.stack || msg);
+    try {
+      if (final) {
+        await jobs.updateOne({ _id: job._id }, { $set: { status: 'failed', error: msg, expire_at: new Date(Date.now() + 14 * DAY) } });
+        await say(ctx, `⚠️ Could not save this song after ${job.attempts} tries: ${msg}`, job.message_id);
+      } else {
+        const wait = Math.min(60000, 3000 * 2 ** (job.attempts - 1));
+        await jobs.updateOne({ _id: job._id }, { $set: { status: 'pending', error: msg, retry_at: new Date(Date.now() + wait) } });
+        log(`job ${job._id} will retry in ${Math.round(wait / 1000)}s`);
+      }
+    } catch (e2) { console.error(`[${new Date().toISOString()}] [audio] could not update job ${job._id} (the poller will recover it):`, e2.message); }
+  }
+}
+
+// one worker, oldest job first; calling it while it runs just asks it to look again
+async function pump() {
+  if (pumping) { pumpAgain = true; return; }
+  pumping = true;
+  try {
+    do {
+      pumpAgain = false;
+      for (;;) {
+        const job = await jobs.findOneAndUpdate(
+          { status: 'pending', retry_at: { $lte: new Date() } },
+          { $set: { status: 'processing', started_at: new Date() }, $inc: { attempts: 1 } },
+          { sort: { order: 1 }, returnDocument: 'after' });
+        if (!job) break;
+        await runJob(job);
+      }
+    } while (pumpAgain);
+  } catch (e) { console.error(`[${new Date().toISOString()}] [audio] pump error (poller will retry):`, e.message); }
+  finally { pumping = false; }
+}
 
 // ---------- Hugging Face uploader (ported from uploader.py) ----------
 // HF_BACKUP_ACCOUNTS="user1:hf_token1,user2:hf_token2"
@@ -1056,7 +1130,7 @@ function getAudio(msg) {
 }
 
 // ---------- core ----------
-async function processAudio(ctx, a, msg = ctx.message, manual = false) {
+async function processAudio(ctx, a, msg = ctx.message, manual = false, final = true) {
   const { from, chat, message_id } = msg;
 
   const t0 = Date.now();
@@ -1096,7 +1170,7 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
 
   try {
     const link = await ctx.telegram.getFileLink(a.file_id); // throws if > 20MB
-    const dl = await fetch(link);
+    const dl = await ft(link, 180000);
     if (!dl.ok) throw new Error(`telegram download failed ${dl.status}`);
     const buf = Buffer.from(await dl.arrayBuffer());
     log(`downloaded ${mb(buf.length)} in ${Date.now() - t0}ms`);
@@ -1151,7 +1225,7 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
     if (!song.poster_url && !song.cover_url && song.tg_thumb_file_id) {
       try {
         const tl = await ctx.telegram.getFileLink(song.tg_thumb_file_id);
-        const tr = await fetch(tl);
+        const tr = await ft(tl);
         if (tr.ok) {
           const tb = Buffer.from(await tr.arrayBuffer());
           const up = await uploadToHost(tb, `${a.file_unique_id}_thumb.jpg`, 'image/jpeg');
@@ -1169,6 +1243,8 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
     song.uploaded = true;
     log(`audio uploaded ${song.upload_url}`);
   } catch (e) {
+    // not the last attempt and not a permanent problem (Telegram's 20MB limit): let the job queue retry instead of saving a broken row
+    if (!final && !/too big/i.test(e.description || e.message || '')) throw e;
     song.upload_error = e.message;
     console.error(`[${new Date().toISOString()}] [audio] PROCESS ERROR msg=${message_id} user=${who(from)}:`, e.stack || e.message);
   }
@@ -1176,7 +1252,8 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
   if (!song.title) song.title = (a.file_name || 'Unknown').replace(/\.[^.]+$/, '');
 
   song.image_url = song.poster_url || song.cover_url;
-  await songs.insertOne(song);
+  try { await songs.insertOne(song); }
+  catch (e) { if (e?.code === 11000) { log(`already saved (duplicate insert) file_unique_id=${a.file_unique_id} chat=${chat.id}`); return; } throw e; }
   await users.updateOne(
     { _id: from.id },
     {
@@ -1298,18 +1375,19 @@ bot.command('upload', async ctx => {
   if (!target.from || target.from.is_bot) return say(ctx, 'That audio was sent by a bot, nothing to attribute it to.');
 
   await say(ctx, 'Processing…', target.message_id);
-  queue(() => processAudio(ctx, a, { from: target.from, chat: m.chat, message_id: target.message_id }, true))
-    .catch(e => console.error(`[${new Date().toISOString()}] [audio] /upload error:`, e));
+  try { await enqueueAudio({ from: target.from, chat: m.chat, message_id: target.message_id }, a, true); }
+  catch (e) { console.error(`[${new Date().toISOString()}] [audio] /upload enqueue failed:`, e); await say(ctx, '⚠️ Could not queue this song, try again.', target.message_id); }
 });
 
-bot.on('message', (ctx, next) => {
+bot.on('message', async (ctx, next) => {
   const m = ctx.message, a = getAudio(m);
   if (!a || ctx.from.is_bot) {
     if (process.env.DEBUG_ALL === '1') log(`ignored msg chat=${m.chat.id} from=${who(ctx.from)} kind=${Object.keys(m).filter(k => !['message_id', 'from', 'chat', 'date'].includes(k)).join(',')}`);
     return next();
   }
-  log(`received audio chat=${m.chat.id} (${m.chat.type}) from=${who(ctx.from)} queued`);
-  queue(() => processAudio(ctx, a)).catch(e => console.error(`[${new Date().toISOString()}] [audio] queue error:`, e));
+  log(`received audio chat=${m.chat.id} (${m.chat.type}) from=${who(ctx.from)}`);
+  try { await enqueueAudio(m, a); }   // saved to Mongo before we return, so Telegram only moves on once the song is safely in line
+  catch (e) { console.error(`[${new Date().toISOString()}] [audio] enqueue failed:`, e); await say(ctx, '⚠️ Could not queue this song, please send it again.', m.message_id); }
 });
 
 bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhandled error on ${ctx.updateType}:`, err));
@@ -1319,7 +1397,7 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   mm = await import('music-metadata');
   hub = await import('@huggingface/hub');
   const client = await new MongoClient(MONGO_URI).connect();
-  const db = client.db('naudio_bot');
+  const db = client.db('audio_bot');
   const udb = client.db(UPLOADER_DB);
   hfFiles = udb.collection('xfiles');
   hfSettings = udb.collection('xsettings');
@@ -1330,6 +1408,11 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   queues = db.collection('queues');
   capsules = db.collection('capsules');
   capSongs = db.collection('capsule_songs');
+  jobs = db.collection('jobs');
+  await jobs.createIndex({ status: 1, retry_at: 1, order: 1 });
+  await jobs.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
+  const back = await jobs.updateMany({ status: 'processing' }, { $set: { status: 'pending', retry_at: new Date() } });   // interrupted by a restart: back in line
+  if (back.modifiedCount) log(`requeued ${back.modifiedCount} interrupted job(s)`);
   await queues.createIndex({ updated_at: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
   await songs.createIndex({ chat_id: 1, file_unique_id: 1 }, { unique: true });
   await songs.createIndex({ song_id: 1 }, { unique: true, sparse: true });
@@ -1345,6 +1428,11 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   await songs.createIndex({ user_id: 1, genre: 1 });
   await songs.createIndex({ user_id: 1, release_date: -1 });
   startApi({ songs, users, queues });
+  pump();
+  setInterval(async () => {   // safety net: wake due retries, rescue jobs stuck in "processing"
+    try { await jobs.updateMany({ status: 'processing', started_at: { $lt: new Date(Date.now() - JOB_TIMEOUT_MS - 60000) } }, { $set: { status: 'pending', retry_at: new Date() } }); } catch {}
+    pump();
+  }, 10000);
   if (process.env.BACKFILL_DEEZER === '1') backfillDeezer().catch(e => console.error('[deezer backfill] failed:', e));
   try {
     const me = await bot.telegram.getMe();
