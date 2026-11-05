@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 
 const { BOT_TOKEN, MONGO_URI, HF_TOKEN, HF_USERNAME, HF_BACKUP_ACCOUNTS = '' } = process.env;
-const SHORT_URL_BASE = process.env.SHORT_URL_BASE ?? 'https://uploadnx.zone.id/'; // set empty to use raw HF urls
+const SHORT_URL_BASE = process.env.SHORT_URL_BASE ?? (process.env.BASE_URL ? process.env.BASE_URL.replace(/\/$/, '') + '/' : ''); // short-link prefix; empty = raw HF urls
 const UPLOADER_DB = process.env.UPLOADER_DB || 'xcatbox_clone'; // same db the python uploader / short-url service uses
 const MAX_DATASET_SIZE = 12 * 1024 ** 3;   // 12GB per dataset
 const MAX_ACCOUNT_STORAGE = 150 * 1024 ** 3; // 150GB per account
@@ -363,6 +363,14 @@ function startApi({ songs, users, queues }) {
   }));
 
   const port = process.env.PORT || 3000;
+  // short links: /<code>.<ext> -> the file on Hugging Face (keep this last so it never shadows other routes)
+  app.get(/^\/([a-z0-9]{6})(\.[a-z0-9]+)?$/, wrap(async (req, res) => {
+    const f = await hfFiles.findOne({ short_code: req.params[0] }, { projection: { hf_url: 1 } });
+    if (!f) return res.status(404).json({ error: 'file not found' });
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.redirect(302, f.hf_url);
+  }));
+
   app.listen(port, () => console.log(`api on :${port}`));
 }
 
@@ -454,6 +462,20 @@ async function uploadToHost(buf, filename, mime) {
   throw new Error(`upload failed on all Hugging Face accounts (${errors.join('; ') || 'none configured'})`);
 }
 
+// reply that never throws but always logs why it failed; retries without reply_parameters (deleted msg / topic quirks)
+async function say(ctx, text, replyTo) {
+  const chatId = ctx.chat?.id;
+  try {
+    return await ctx.reply(text, replyTo ? { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } } : undefined);
+  } catch (e) {
+    console.error(`[${new Date().toISOString()}] [audio] REPLY FAILED chat=${chatId}: ${e.description || e.message}`);
+    if (replyTo) {
+      try { return await ctx.reply(text); }
+      catch (e2) { console.error(`[${new Date().toISOString()}] [audio] REPLY RETRY FAILED chat=${chatId}: ${e2.description || e2.message}`); }
+    }
+  }
+}
+
 const extOf = (name, mime) =>
   (name && name.includes('.') ? name.split('.').pop() : (mime || '').split('/').pop() || 'mp3')
     .toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp3';
@@ -474,7 +496,7 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
   const dupe = await songs.findOne({ file_unique_id: a.file_unique_id, chat_id: chat.id });
   if (dupe) {
     log(`skip duplicate file_unique_id=${a.file_unique_id} in chat=${chat.id} (song_id=${dupe.song_id})`);
-    if (manual) await ctx.reply(`Already saved in this chat: ${dupe.title || 'song'} (id ${dupe.song_id}, uploaded=${dupe.uploaded})`, { reply_parameters: { message_id } }).catch(() => {});
+    if (manual) await say(ctx, `Already saved in this chat: ${dupe.title || 'song'} (id ${dupe.song_id}, uploaded=${dupe.uploaded})`, message_id);
     return;
   }
 
@@ -587,8 +609,7 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
   log(`saved song_id=${song.song_id} uploaded=${song.uploaded} user=${who(from)} playlist=/playlist/${from.id} total_time=${Date.now() - t0}ms`);
 
   const label = `${song.title}${song.artist ? ' — ' + song.artist : ''}`;
-  await ctx.reply(song.uploaded ? `✅ Saved: ${label}` : `⚠️ Logged (not uploaded: ${song.upload_error}): ${label}`,
-    { reply_parameters: { message_id } }).catch(() => {});
+  await say(ctx, song.uploaded ? `✅ Saved: ${label}` : `⚠️ Logged (not uploaded: ${song.upload_error}): ${label}`, message_id);
 }
 
 // ---------- handlers ----------
@@ -621,12 +642,11 @@ bot.command('upload', async ctx => {
   const target = m.reply_to_message;
   const a = target && getAudio(target);
   if (!a) {
-    return ctx.reply(`Reply to an audio file with /upload.\nchat: ${m.chat.id} (${m.chat.type})\nI can see this command, so the bot is receiving updates here.`,
-      { reply_parameters: { message_id: m.message_id } }).catch(() => {});
+    return say(ctx, `Reply to an audio file with /upload.\nchat: ${m.chat.id} (${m.chat.type})\nI can see this command, so the bot is receiving updates here.`, m.message_id);
   }
-  if (!target.from || target.from.is_bot) return ctx.reply('That audio was sent by a bot, nothing to attribute it to.').catch(() => {});
+  if (!target.from || target.from.is_bot) return say(ctx, 'That audio was sent by a bot, nothing to attribute it to.');
 
-  await ctx.reply('Processing…', { reply_parameters: { message_id: target.message_id } }).catch(() => {});
+  await say(ctx, 'Processing…', target.message_id);
   queue(() => processAudio(ctx, a, { from: target.from, chat: m.chat, message_id: target.message_id }, true))
     .catch(e => console.error(`[${new Date().toISOString()}] [audio] /upload error:`, e));
 });
