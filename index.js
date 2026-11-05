@@ -938,7 +938,8 @@ async function genSongId() {
 const JOB_MAX_ATTEMPTS = 4, JOB_TIMEOUT_MS = 10 * 60 * 1000, DAY = 86400000;
 const withTimeout = (p, ms, label) => { let t; return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms); })]).finally(() => clearTimeout(t)); };
 const jobCtx = chat => ({ chat, telegram: bot.telegram, reply: (text, extra) => bot.telegram.sendMessage(chat.id, text, extra) });   // no live update needed, so jobs survive restarts
-let jobSeq = 0, pumping = false, pumpAgain = false;
+let jobSeq = 0, activeWorkers = 0;
+const WORKERS = 2;
 
 async function enqueueAudio({ from, chat, message_id }, a, manual = false) {
   const now = Date.now();
@@ -960,6 +961,8 @@ async function enqueueAudio({ from, chat, message_id }, a, manual = false) {
     }
   }
   log(`job ${job._id} queued (${a.file_name || a.title || a.file_unique_id})`);
+  bot.telegram.setMessageReaction(chat.id, message_id, [{ type: 'emoji', emoji: '👍' }])
+    .catch(e => log(`ack reaction failed: ${e.description || e.message}`));
   pump();
 }
 
@@ -976,6 +979,7 @@ async function runJob(job) {
     try {
       if (final) {
         await jobs.updateOne({ _id: job._id }, { $set: { status: 'failed', error: msg, expire_at: new Date(Date.now() + 14 * DAY) } });
+        await clearReact(job.chat.id, job.message_id);
         await say(ctx, `⚠️ Could not save this song after ${job.attempts} tries: ${msg}`, job.message_id);
       } else {
         const wait = Math.min(60000, 3000 * 2 ** (job.attempts - 1));
@@ -986,24 +990,25 @@ async function runJob(job) {
   }
 }
 
-// one worker, oldest job first; calling it while it runs just asks it to look again
-async function pump() {
-  if (pumping) { pumpAgain = true; return; }
-  pumping = true;
-  try {
-    do {
-      pumpAgain = false;
-      for (;;) {
-        const job = await jobs.findOneAndUpdate(
-          { status: 'pending', retry_at: { $lte: new Date() } },
-          { $set: { status: 'processing', started_at: new Date() }, $inc: { attempts: 1 } },
-          { sort: { order: 1 }, returnDocument: 'after' });
-        if (!job) break;
-        await runJob(job);
-      }
-    } while (pumpAgain);
-  } catch (e) { console.error(`[${new Date().toISOString()}] [audio] pump error (poller will retry):`, e.message); }
-  finally { pumping = false; }
+// WORKERS workers, oldest job first; findOneAndUpdate is atomic so two workers never take the same job.
+// pump() just tops the pool up; the 10s poller is the safety net if a worker exits right as a job lands
+function pump() {
+  while (activeWorkers < WORKERS) {
+    activeWorkers++;
+    (async () => {
+      try {
+        for (;;) {
+          const job = await jobs.findOneAndUpdate(
+            { status: 'pending', retry_at: { $lte: new Date() } },
+            { $set: { status: 'processing', started_at: new Date() }, $inc: { attempts: 1 } },
+            { sort: { order: 1 }, returnDocument: 'after' });
+          if (!job) break;
+          await runJob(job);
+        }
+      } catch (e) { console.error(`[${new Date().toISOString()}] [audio] pump error (poller will retry):`, e.message); }
+      finally { activeWorkers--; }
+    })();
+  }
 }
 
 // ---------- Hugging Face uploader (ported from uploader.py) ----------
@@ -1102,8 +1107,9 @@ async function say(ctx, text, replyTo) {
 // so try REACT_EMOJI first and fall back to the next one; remember what works so we don't retry bad ones
 const REACT_TRY = [process.env.REACT_EMOJI || '🔥', '👍'];
 const badReact = new Set();
-async function react(ctx, chatId, messageId) {
-  for (const emoji of REACT_TRY) {
+const clearReact = (chatId, messageId) => bot.telegram.setMessageReaction(chatId, messageId, []).catch(() => {});
+async function react(ctx, chatId, messageId, tries = REACT_TRY) {
+  for (const emoji of tries) {
     if (badReact.has(emoji)) continue;
     try {
       await ctx.telegram.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji }]);
@@ -1123,9 +1129,11 @@ const extOf = (name, mime) =>
   (name && name.includes('.') ? name.split('.').pop() : (mime || '').split('/').pop() || 'mp3')
     .toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp3';
 
+const AUDIO_EXT = /\.(mp3|m4a|aac|flac|wav|ogg|oga|opus|wma|aiff?|alac|amr)$/i;
 function getAudio(msg) {
   if (msg.audio) return msg.audio;
-  if (msg.document?.mime_type?.startsWith('audio/')) return msg.document;
+  const d = msg.document;   // sent "as file": mime is often application/octet-stream, so fall back to the extension
+  if (d && (d.mime_type?.startsWith('audio/') || AUDIO_EXT.test(d.file_name || ''))) return d;
   return null;
 }
 
@@ -1139,7 +1147,8 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false, final = t
   const dupe = await songs.findOne({ file_unique_id: a.file_unique_id, chat_id: chat.id });
   if (dupe) {
     log(`skip duplicate file_unique_id=${a.file_unique_id} in chat=${chat.id} (song_id=${dupe.song_id})`);
-    if (manual) await say(ctx, `Already saved in this chat: ${dupe.title || 'song'} (id ${dupe.song_id}, uploaded=${dupe.uploaded})`, message_id);
+    // ❌ isn't in Telegram's default reaction set, so fall back to 👎 unless the group has ❌ enabled
+    if (!(await react(ctx, chat.id, message_id, ['❌', '👎']))) await clearReact(chat.id, message_id);
     return;
   }
 
@@ -1178,7 +1187,7 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false, final = t
 
     // metadata from the actual file
     try {
-      const meta = await mm.parseBuffer(buf, { mimeType: a.mime_type }, { duration: true });
+      const meta = await mm.parseBuffer(buf, { mimeType: a.mime_type?.startsWith('audio/') ? a.mime_type : undefined }, { duration: true });
       const c = meta.common, f = meta.format;
       song.title = c.title || song.title;
       song.artist = c.artist || song.artist;
@@ -1275,6 +1284,7 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false, final = t
   if (song.uploaded) {
     if (!(await react(ctx, chat.id, message_id))) await say(ctx, `✅ Saved: ${label}`, message_id); // fall back to a reply only if reacting is impossible here
   } else {
+    await clearReact(chat.id, message_id);
     await say(ctx, `⚠️ Logged (not uploaded: ${song.upload_error}): ${label}`, message_id);
   }
 }
@@ -1381,7 +1391,13 @@ bot.command('upload', async ctx => {
 
 bot.on('message', async (ctx, next) => {
   const m = ctx.message, a = getAudio(m);
-  if (!a || ctx.from.is_bot) {
+  if (a && (ctx.from?.is_bot || m.sender_chat)) {
+    log(`IGNORED audio msg=${m.message_id} chat=${m.chat.id} from=${who(ctx.from)} sender_chat=${m.sender_chat?.id || '-'}`);
+    if (m.sender_chat || [1087968824, 136817688].includes(ctx.from?.id))   // anonymous admin / channel identity: no real user to credit
+      await say(ctx, '⚠️ I can’t save songs sent anonymously or as a channel. Send it from your own account.', m.message_id);
+    return;
+  }
+  if (!a) {
     if (process.env.DEBUG_ALL === '1') log(`ignored msg chat=${m.chat.id} from=${who(ctx.from)} kind=${Object.keys(m).filter(k => !['message_id', 'from', 'chat', 'date'].includes(k)).join(',')}`);
     return next();
   }
