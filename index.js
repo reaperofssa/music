@@ -12,6 +12,9 @@ const UPLOADER_DB = process.env.UPLOADER_DB || 'xcatbox_clone'; // same db the p
 const MAX_DATASET_SIZE = 12 * 1024 ** 3;   // 12GB per dataset
 const MAX_ACCOUNT_STORAGE = 150 * 1024 ** 3; // 150GB per account
 const DEST_DIR = 'uploads';
+const log = (...a) => console.log(`[${new Date().toISOString()}] [audio]`, ...a);
+const who = u => u ? `${u.id}${u.username ? ' @' + u.username : ''}` : '?';
+const mb = n => n ? (n / 1048576).toFixed(2) + 'MB' : '?';
 const bot = new Telegraf(BOT_TOKEN);
 let users, songs, queues, mm, hub, hfFiles, hfSettings;
 
@@ -413,7 +416,7 @@ async function uploadToHost(buf, filename, mime) {
   for (const { username, token } of hfAccounts()) {
     try {
       const st = await hfStorage(username);
-      if (st.total_size + size > MAX_ACCOUNT_STORAGE) { errors.push(`${username}: full`); continue; }
+      if (st.total_size + size > MAX_ACCOUNT_STORAGE) { errors.push(`${username}: full`); log(`hf ${username}: account full, trying next`); continue; }
 
       // newest dataset, or a fresh one when it would pass 12GB
       const last = st.datasets[st.datasets.length - 1];
@@ -422,6 +425,7 @@ async function uploadToHost(buf, filename, mime) {
         do name = `file-storage-${1000 + crypto.randomInt(9000)}`; while (st.datasets.some(d => d.name === name));
       }
       const repoName = `${username}/${name}`;
+      log(`hf try ${repoName} file=${filename} size=${mb(size)}${last && last.name === name ? '' : ' (new dataset)'}`);
       await ensureDataset(repoName, token);
 
       const code = await shortCode();
@@ -440,10 +444,11 @@ async function uploadToHost(buf, filename, mime) {
       const r = await hfSettings.updateOne({ _id: id, 'datasets.name': name }, { $inc: { 'datasets.$.size': size, total_size: size } });
       if (!r.matchedCount) await hfSettings.updateOne({ _id: id }, { $inc: { total_size: size }, $push: { datasets: { name, size } } });
 
+      log(`hf ok ${repoName}/${dest} total_used=${mb(st.total_size + size)}`);
       return { short_url: SHORT_URL_BASE ? `${SHORT_URL_BASE}${code}${ext}` : hf_url, code, hf_url };
     } catch (e) {
       errors.push(`${username}: ${e.message}`);
-      console.warn(`[hf] upload failed for ${username}: ${e.message}`);
+      console.warn(`[${new Date().toISOString()}] [audio] hf FAILED ${username}: ${e.message}`);
     }
   }
   throw new Error(`upload failed on all Hugging Face accounts (${errors.join('; ') || 'none configured'})`);
@@ -463,7 +468,10 @@ function getAudio(msg) {
 async function processAudio(ctx, a) {
   const { from, chat, message_id } = ctx.message;
 
-  if (await songs.findOne({ file_unique_id: a.file_unique_id, chat_id: chat.id })) return; // dupe
+  const t0 = Date.now();
+  log(`start msg=${message_id} chat=${chat.id} "${chat.title || chat.type}" user=${who(from)} file="${a.file_name || a.title || '?'}" size=${mb(a.file_size)} mime=${a.mime_type || '?'}`);
+  if (a.file_size && a.file_size > 20 * 1024 * 1024) log('WARN file > 20MB, Telegram Bot API cannot download it');
+  if (await songs.findOne({ file_unique_id: a.file_unique_id, chat_id: chat.id })) { log(`skip duplicate file_unique_id=${a.file_unique_id} in chat=${chat.id}`); return; }
 
   const song = {
     chat_id: chat.id,
@@ -491,7 +499,10 @@ async function processAudio(ctx, a) {
 
   try {
     const link = await ctx.telegram.getFileLink(a.file_id); // throws if > 20MB
-    const buf = Buffer.from(await (await fetch(link)).arrayBuffer());
+    const dl = await fetch(link);
+    if (!dl.ok) throw new Error(`telegram download failed ${dl.status}`);
+    const buf = Buffer.from(await dl.arrayBuffer());
+    log(`downloaded ${mb(buf.length)} in ${Date.now() - t0}ms`);
     const ext = extOf(a.file_name, a.mime_type);
 
     // metadata from the actual file
@@ -509,6 +520,7 @@ async function processAudio(ctx, a) {
       song.sample_rate = f.sampleRate || null;
       song.codec = f.codec || f.container || null;
       song.duration = f.duration ? Math.round(f.duration) : song.duration;
+      log(`meta title="${song.title}" artist="${song.artist}" album="${song.album}" codec=${song.codec} bitrate=${song.bitrate} dur=${song.duration}s cover=${!!c.picture?.length}`);
 
       // embedded cover -> upload it too
       const pic = mm.selectCover(c.picture);
@@ -516,8 +528,9 @@ async function processAudio(ctx, a) {
         const cExt = extOf(null, pic.format) === 'jpeg' ? 'jpg' : extOf(null, pic.format);
         const cr = await uploadToHost(Buffer.from(pic.data), `${a.file_unique_id}_cover.${cExt}`, pic.format);
         song.cover_url = cr.short_url;
+        log(`cover uploaded ${cr.short_url}`);
       }
-    } catch (e) { console.warn('meta parse failed:', e.message); }
+    } catch (e) { console.warn(`[${new Date().toISOString()}] [audio] meta/cover step failed:`, e.message); }
 
     // better-quality poster from Deezer (title + artist search, regex-matched)
     try {
@@ -531,8 +544,9 @@ async function processAudio(ctx, a) {
         song.poster_url = pr.short_url;
         song.deezer_id = p.deezerId;
         if (!song.album) song.album = p.album;
-      }
-    } catch (e) { console.warn('poster failed:', e.message); }
+        log(`poster uploaded deezer=${p.deezerId} ${pr.short_url}`);
+      } else log('poster: no deezer match');
+    } catch (e) { console.warn(`[${new Date().toISOString()}] [audio] poster failed:`, e.message); }
 
     // upload the audio
     const r = await uploadToHost(buf, `${a.file_unique_id}.${ext}`, a.mime_type || 'audio/mpeg');
@@ -540,9 +554,10 @@ async function processAudio(ctx, a) {
     song.upload_code = r.code;
     song.hf_url = r.hf_url || null;
     song.uploaded = true;
+    log(`audio uploaded ${song.upload_url}`);
   } catch (e) {
     song.upload_error = e.message;
-    console.error('process error:', e.message);
+    console.error(`[${new Date().toISOString()}] [audio] PROCESS ERROR msg=${message_id} user=${who(from)}:`, e.stack || e.message);
   }
 
   if (!song.title) song.title = (a.file_name || 'Unknown').replace(/\.[^.]+$/, '');
@@ -564,6 +579,8 @@ async function processAudio(ctx, a) {
     { upsert: true }
   );
 
+  log(`saved song_id=${song.song_id} uploaded=${song.uploaded} user=${who(from)} playlist=/playlist/${from.id} total_time=${Date.now() - t0}ms`);
+
   const label = `${song.title}${song.artist ? ' — ' + song.artist : ''}`;
   await ctx.reply(song.uploaded ? `✅ Saved: ${label}` : `⚠️ Logged (not uploaded: ${song.upload_error}): ${label}`,
     { reply_parameters: { message_id } }).catch(() => {});
@@ -583,10 +600,16 @@ bot.command('me', async ctx => {
 });
 
 bot.on('message', (ctx, next) => {
-  const a = getAudio(ctx.message);
-  if (!a || ctx.from.is_bot) return next();
-  queue(() => processAudio(ctx, a)).catch(e => console.error(e));
+  const m = ctx.message, a = getAudio(m);
+  if (!a || ctx.from.is_bot) {
+    if (process.env.DEBUG_ALL === '1') log(`ignored msg chat=${m.chat.id} from=${who(ctx.from)} kind=${Object.keys(m).filter(k => !['message_id', 'from', 'chat', 'date'].includes(k)).join(',')}`);
+    return next();
+  }
+  log(`received audio chat=${m.chat.id} (${m.chat.type}) from=${who(ctx.from)} queued`);
+  queue(() => processAudio(ctx, a)).catch(e => console.error(`[${new Date().toISOString()}] [audio] queue error:`, e));
 });
+
+bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhandled error on ${ctx.updateType}:`, err));
 
 // ---------- boot ----------
 (async () => {
@@ -608,6 +631,10 @@ bot.on('message', (ctx, next) => {
   await songs.createIndex({ user_id: 1, created_at: -1 });
   await songs.createIndex({ listens: -1, created_at: -1 });
   startApi({ songs, users, queues });
+  try {
+    const me = await bot.telegram.getMe();
+    log(`bot @${me.username} id=${me.id} can_read_all_group_messages=${me.can_read_all_group_messages}${me.can_read_all_group_messages ? '' : '  <-- privacy mode is ON, bot only sees commands/replies in groups'}`);
+  } catch (e) { console.error('getMe failed:', e.message); }
   await bot.launch();
   console.log('audio bot running');
 })();
