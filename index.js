@@ -16,7 +16,8 @@ const log = (...a) => console.log(`[${new Date().toISOString()}] [audio]`, ...a)
 const who = u => u ? `${u.id}${u.username ? ' @' + u.username : ''}` : '?';
 const mb = n => n ? (n / 1048576).toFixed(2) + 'MB' : '?';
 const bot = new Telegraf(BOT_TOKEN);
-let users, songs, queues, capsules, capSongs, jobs, mm, hub, hfFiles, hfSettings;
+let users, songs, queues, capsules, capSongs, jobs, mm, hub, hfFiles, hfSettings, nowp, lhours;
+const HOUR = 3600 * 1000;
 
 // ---------- poster (Deezer) ----------
 const L = '\\p{L}\\p{M}\\p{N}';
@@ -188,14 +189,14 @@ const verifyJwt = tok => {
   try { const p = JSON.parse(Buffer.from(b, 'base64url').toString()); return p.exp > Date.now() / 1000 ? p : null; } catch { return null; }
 };
 // https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
-function verifyInitData(raw) {
+function verifyInitData(raw, maxAge = INITDATA_MAX_AGE) {
   const params = new URLSearchParams(String(raw || ''));
   const hash = params.get('hash');
   if (!hash) return null;
   params.delete('hash');
   const check = [...params.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => `${k}=${v}`).join('\n');
   if (!same(Buffer.from(hash, 'hex'), hmac(hmac('WebAppData', BOT_TOKEN), check))) return null;
-  if (Date.now() / 1000 - Number(params.get('auth_date')) > INITDATA_MAX_AGE) return null;
+  if (Date.now() / 1000 - Number(params.get('auth_date')) > maxAge) return null;
   try { const u = JSON.parse(params.get('user')); return Number.isInteger(u?.id) ? u : null; } catch { return null; }
 }
 const cookieOf = (req, name) => (req.headers.cookie || '').split(';').map(c => c.trim().split(/=(.*)/s)).find(([k]) => k === name)?.[1];
@@ -345,6 +346,10 @@ function startApi({ songs, users, queues }) {
     if (BOT_UA.test(req.get('user-agent') || '') || now - (seen.get(key) || 0) < LISTEN_WINDOW) return false;
     seen.set(key, now);
     await songs.updateOne({ song_id: id }, { $inc: { listens: 1 }, $set: { last_listened_at: new Date() } });
+    // hourly bucket, so /top can rank by 24h / 7d / 30d and compare against the previous window (trends)
+    const h = Math.floor(now / HOUR);
+    lhours.updateOne({ _id: `${id}:${h}` }, { $inc: { n: 1 }, $setOnInsert: { song_id: id, h, expire_at: new Date(now + 75 * DAY) } }, { upsert: true })
+      .catch(e => console.error('[top] hour bucket failed:', e.message));
     return true;
   };
 
@@ -468,6 +473,62 @@ function startApi({ songs, users, queues }) {
     });
   }));
 
+  // ===== /top: most played songs, live, with trends =====
+  // Ranked by plays inside a window (24h / 7d / 30d) or all time. Trend = rank now vs rank in the previous window of the same length
+  // (all time: vs rank 24h ago, rebuilt as listens minus the last 24h of plays). Responses are cached a few seconds and shared.
+  const TOP_HOURS = { '24h': 24, '7d': 168, '30d': 720 };
+  const TOP_SHOW = 100, TOP_POOL = 300, TOP_TTL = 5000;
+  const topCache = new Map();   // period -> { t, p }
+
+  async function buildTop(period) {
+    const now = Date.now(), hNow = Math.floor(now / HOUR);
+    let cur, prevRank = new Map(), hasPrev = false;
+    if (period === 'all') {
+      const pool = await songs.find({ uploaded: true, listens: { $gt: 0 } }).sort({ listens: -1, created_at: -1, _id: -1 }).limit(TOP_POOL).toArray();
+      const rec = new Map((await lhours.aggregate([{ $match: { h: { $gt: hNow - 24 } } }, { $group: { _id: '$song_id', n: { $sum: '$n' } } }]).toArray()).map(x => [x._id, x.n]));
+      hasPrev = rec.size > 0;
+      pool.map(s => ({ s, v: (s.listens || 0) - (rec.get(s.song_id) || 0) })).filter(x => x.v > 0)
+        .sort((a, b) => b.v - a.v || b.s.created_at - a.s.created_at || (a.s._id < b.s._id ? 1 : -1))
+        .forEach((x, i) => prevRank.set(x.s.song_id, i + 1));
+      cur = pool.slice(0, TOP_SHOW).map(s => ({ s, plays: s.listens || 0, extra: rec.get(s.song_id) || 0 }));
+    } else {
+      const W = TOP_HOURS[period];
+      const agg = (lo, hi, lim) => lhours.aggregate([{ $match: { h: { $gt: lo, $lte: hi } } }, { $group: { _id: '$song_id', n: { $sum: '$n' } } }, { $sort: { n: -1, _id: 1 } }, { $limit: lim }]).toArray();
+      const [now_, prev] = await Promise.all([agg(hNow - W, hNow, TOP_SHOW + 50), agg(hNow - 2 * W, hNow - W, 1000)]);
+      hasPrev = prev.length > 0;
+      prev.forEach((x, i) => prevRank.set(x._id, i + 1));
+      const docs = new Map((await songs.find({ song_id: { $in: now_.map(x => x._id) }, uploaded: true }).toArray()).map(s => [s.song_id, s]));
+      cur = now_.filter(x => docs.has(x._id)).slice(0, TOP_SHOW).map(x => ({ s: docs.get(x._id), plays: x.n, extra: docs.get(x._id).listens || 0 }));
+    }
+    const owners = new Map((await users.find({ _id: { $in: [...new Set(cur.map(x => x.s.user_id))] } }).toArray()).map(u => [u._id, shapeUser(u)]));
+    const live = await nowp.aggregate([{ $match: { playing: true, expire_at: { $gt: new Date() } } }, { $group: { _id: '$song_id', n: { $sum: 1 } } }]).toArray();
+    const liveBy = new Map(live.map(x => [x._id, x.n]));
+    return {
+      period, updated_at: new Date(now), has_trend: hasPrev,
+      live: live.reduce((a, x) => a + x.n, 0),
+      songs: cur.map((x, i) => {
+        const rank = i + 1, pr = prevRank.get(x.s.song_id);
+        const trend = !hasPrev ? 'none' : pr == null ? 'new' : pr > rank ? 'up' : pr < rank ? 'down' : 'same';
+        return { ...shapeSong(x.s), rank, prev_rank: pr ?? null, trend, delta: pr ? Math.abs(pr - rank) : 0, plays: x.plays, extra: x.extra,
+          listeners: liveBy.get(x.s.song_id) || 0, added_by: owners.get(x.s.user_id) || null };
+      }),
+    };
+  }
+  const topCached = period => {
+    const c = topCache.get(period);
+    if (c && Date.now() - c.t < TOP_TTL) return c.p;
+    const p = buildTop(period).catch(e => { topCache.delete(period); throw e; });
+    topCache.set(period, { t: Date.now(), p });
+    return p;
+  };
+
+  app.get('/top', (req, res) => res.sendFile(path.join(__dirname, 'top.html')));
+  app.get('/top/data', wrap(async (req, res) => {
+    const period = req.query.period === 'all' || TOP_HOURS[req.query.period] ? req.query.period : 'all';
+    res.set('Cache-Control', 'no-store');
+    res.json(await topCached(period));
+  }));
+
   // ---------- queue / player ----------
   app.use(express.json());
 
@@ -489,6 +550,30 @@ function startApi({ songs, users, queues }) {
     p ? res.json({ user_id: p.sub }) : res.status(401).json({ error: 'not signed in' });
   });
   app.post('/me/logout', (req, res) => { res.clearCookie(SESSION_COOKIE, COOKIE_OPTS(req)); res.json({ ok: true }); });
+
+  // ===== now playing (powers /status). The player sends a heartbeat with Telegram initData, so it identifies the listener
+  // whether the Mini App was opened from a group or from the bot's DM. No cookie involved, so no CSRF concern. =====
+  const NOWP_TTL = 60 * 1000;
+  app.post('/nowplaying', wrap(async (req, res) => {
+    const u = verifyInitData(req.body?.initData, 7 * 24 * 3600);   // a player left open for days keeps its launch-time initData
+    if (!u) return res.status(401).json({ error: 'invalid Telegram data' });
+    const now = Date.now();
+    const at = Math.min(Number(req.body?.at) || now, now + 60000);   // client clock, only used to ignore out-of-order requests
+    const cur = await nowp.findOne({ _id: u.id }, { projection: { at: 1 } });
+    if (cur && at < cur.at) return res.json({ ok: true, stale: true });
+    if (req.body?.state !== 'playing') {
+      await nowp.updateOne({ _id: u.id }, { $set: { playing: false, at, expire_at: new Date(now + NOWP_TTL) } }, { upsert: true });
+      return res.json({ ok: true });
+    }
+    const id = String(req.body?.song_id || '');
+    const s = await songs.findOne({ song_id: id, uploaded: true }, { projection: { title: 1, artist: 1, file_name: 1 } });
+    if (!s) return res.status(404).json({ error: 'song not found' });
+    await nowp.updateOne({ _id: u.id }, { $set: {
+      playing: true, song_id: id, at, updated_at: new Date(now), expire_at: new Date(now + NOWP_TTL),
+      title: s.title || (s.file_name || '').replace(/\.[^.]+$/, '') || 'Unknown', artist: s.artist || null,
+    } }, { upsert: true });
+    res.json({ ok: true });
+  }));
 
   const auth = (req, res, next) => {
     const p = verifyJwt(cookieOf(req, SESSION_COOKIE));
@@ -1369,6 +1454,25 @@ bot.command('profile', async ctx => {
   }
 });
 
+// ---------- /status ----------
+// /status           -> "You’re listening to <song> by <artist>"
+// /status (reply)   -> "<Name> is listening to <song> by <artist>"
+// Works in groups and in the bot's DM: the listener is identified by the Mini App player (Telegram initData), not by the chat.
+bot.command('status', async ctx => {
+  const m = ctx.message, replyTo = m.message_id;
+  const r = m.reply_to_message;
+  const rep = r && !r.forum_topic_created ? r.from : null;   // in forum topics every message "replies" to the topic's first message
+  if (rep?.is_bot) return say(ctx, 'Bots don’t listen to music.', replyTo);
+  const other = rep && rep.id !== ctx.from.id ? rep : null;
+  const target = other || ctx.from;
+
+  const np = await nowp.findOne({ _id: target.id, playing: true, expire_at: { $gt: new Date() } });
+  const subject = other ? dispName(other) : 'You’re';
+  if (!np) return say(ctx, other ? `${subject} isn’t listening to anything right now.` : 'You’re not listening to anything right now.', replyTo);
+  const song = `${np.title}${np.artist ? ' by ' + np.artist : ''}`;
+  return say(ctx, other ? `${subject} is listening to ${song}` : `You’re listening to ${song}`, replyTo);
+});
+
 // /upload - owner only. Reply to an audio file with /upload to force-process it.
 // Commands are always delivered to bots (even with privacy mode on), so this also tells you whether the bot sees the group.
 const UPLOAD_ADMIN_ID = Number(process.env.UPLOAD_ADMIN_ID || 8955269933);
@@ -1434,6 +1538,11 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   capsules = db.collection('capsules');
   capSongs = db.collection('capsule_songs');
   jobs = db.collection('jobs');
+  lhours = db.collection('listen_hours');
+  await lhours.createIndex({ h: 1, song_id: 1 });
+  await lhours.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
+  nowp = db.collection('nowplaying');
+  await nowp.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
   await jobs.createIndex({ status: 1, retry_at: 1, order: 1 });
   await jobs.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
   const back = await jobs.updateMany({ status: 'processing' }, { $set: { status: 'pending', retry_at: new Date() } });   // interrupted by a restart: back in line
