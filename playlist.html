@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
 <title>@playlists</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 /* ===== theme tokens (the owner's appearance settings overwrite --bg / --text / --accent from JS; everything else derives from them) ===== */
 :root{
@@ -337,7 +338,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
 <script>
 (() => {
   const $ = id => document.getElementById(id), audio = $('audio');
-  const launch = (() => { const q = new URLSearchParams(location.search), h = location.hash.slice(1); return q.get('tgWebAppStartParam') || (h.includes('=') ? new URLSearchParams(h).get('tgWebAppStartParam') : null); })();
+  const launch = (() => { const q = new URLSearchParams(location.search), h = location.hash.slice(1); return q.get('tgWebAppStartParam') || (h.includes('=') ? new URLSearchParams(h).get('tgWebAppStartParam') : null) || (window.Telegram && Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.start_param) || null; })();
   const uid = (() => {
     const seg = location.pathname.replace(/\/+$/, '').split('/').pop();
     try { if (launch) sessionStorage.setItem('pl_uid', launch); return /^\d+$/.test(seg) ? seg : launch || sessionStorage.getItem('pl_uid') || seg; } catch { return /^\d+$/.test(seg) ? seg : launch || seg; }
