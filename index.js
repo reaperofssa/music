@@ -944,7 +944,7 @@ const WORKERS = 2;
 async function enqueueAudio({ from, chat, message_id }, a, manual = false) {
   const now = Date.now();
   const job = {
-    _id: `${chat.id}:${message_id}${manual ? ':m' + now : ''}`,
+    _id: `${chat.id}:${message_id}:${a.file_unique_id}${manual ? ':m' + now : ''}`,
     status: 'pending', attempts: 0, manual,
     order: now * 1000 + (jobSeq++ % 1000),   // arrival order, even for messages that land in the same millisecond
     created_at: new Date(now), retry_at: new Date(now),
@@ -1389,22 +1389,31 @@ bot.command('upload', async ctx => {
   catch (e) { console.error(`[${new Date().toISOString()}] [audio] /upload enqueue failed:`, e); await say(ctx, '⚠️ Could not queue this song, try again.', target.message_id); }
 });
 
-bot.on('message', async (ctx, next) => {
-  const m = ctx.message, a = getAudio(m);
+// Inline bots (e.g. @music bots) first post a "loading" message and later swap in the real audio with editMessageMedia.
+// Telegram delivers that swap as an `edited_message` update, not a `message`, so both are handled by the same function.
+async function onAudioMsg(ctx, m, next, edited = false) {
+  const a = getAudio(m);
   if (a && (ctx.from?.is_bot || m.sender_chat)) {
     log(`IGNORED audio msg=${m.message_id} chat=${m.chat.id} from=${who(ctx.from)} sender_chat=${m.sender_chat?.id || '-'}`);
-    if (m.sender_chat || [1087968824, 136817688].includes(ctx.from?.id))   // anonymous admin / channel identity: no real user to credit
+    if (!edited && (m.sender_chat || [1087968824, 136817688].includes(ctx.from?.id)))   // anonymous admin / channel identity: no real user to credit
       await say(ctx, '⚠️ I can’t save songs sent anonymously or as a channel. Send it from your own account.', m.message_id);
     return;
   }
   if (!a) {
-    if (process.env.DEBUG_ALL === '1') log(`ignored msg chat=${m.chat.id} from=${who(ctx.from)} kind=${Object.keys(m).filter(k => !['message_id', 'from', 'chat', 'date'].includes(k)).join(',')}`);
+    if (m.via_bot && !edited) log(`inline message from @${m.via_bot.username} has no audio yet (chat=${m.chat.id} msg=${m.message_id}), waiting for its edit`);
+    else if (process.env.DEBUG_ALL === '1') log(`ignored ${edited ? 'edit' : 'msg'} chat=${m.chat.id} from=${who(ctx.from)} kind=${Object.keys(m).filter(k => !['message_id', 'from', 'chat', 'date'].includes(k)).join(',')}`);
     return next();
   }
-  log(`received audio chat=${m.chat.id} (${m.chat.type}) from=${who(ctx.from)}`);
+  if (edited) {   // caption/other edits of a song we already have must not re-trigger anything
+    const have = await songs.findOne({ chat_id: m.chat.id, file_unique_id: a.file_unique_id }, { projection: { _id: 1 } });
+    if (have) return log(`edit of already-saved audio msg=${m.message_id}, ignoring`);
+  }
+  log(`received audio${edited ? ' (edited)' : ''}${m.via_bot ? ` via @${m.via_bot.username}` : ''} chat=${m.chat.id} (${m.chat.type}) from=${who(ctx.from)} msg=${m.message_id}`);
   try { await enqueueAudio(m, a); }   // saved to Mongo before we return, so Telegram only moves on once the song is safely in line
   catch (e) { console.error(`[${new Date().toISOString()}] [audio] enqueue failed:`, e); await say(ctx, '⚠️ Could not queue this song, please send it again.', m.message_id); }
-});
+}
+bot.on('message', (ctx, next) => onAudioMsg(ctx, ctx.message, next));
+bot.on('edited_message', (ctx, next) => onAudioMsg(ctx, ctx.editedMessage, next, true));
 
 bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhandled error on ${ctx.updateType}:`, err));
 
