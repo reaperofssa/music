@@ -77,7 +77,8 @@ async function fetchCover(album) {
 // returns { buf, deezerId, album } or null
 async function findPoster({ title, artist, duration }) {
   if (!title) return null;
-  const q = encodeURIComponent(`${title} ${artist || ''}`.trim());
+  const stripBr = x => String(x || '').replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/\s+/g, ' ').trim();
+  const q = encodeURIComponent(`${stripBr(title)} ${artist || ''}`.trim());
   const r = await fetch(`https://api.deezer.com/search?q=${q}&limit=10`);
   if (!r.ok) return null;
   const { data = [] } = await r.json();
@@ -85,6 +86,22 @@ async function findPoster({ title, artist, duration }) {
   if (!v) return null;
   const buf = await fetchCover(v.album);
   return buf ? { buf, deezerId: v.id, album: v.album?.title || null } : null;
+}
+
+// YouTube-style uploads put the channel in "artist" and "Artist - Title (Official Video)" in the title,
+// so try: parsed from title -> as tagged -> title only (duration must then match)
+async function findPosterSmart({ title, artist, duration }) {
+  const m = String(title || '').match(/^(.+?)\s+[-–—]\s+(.+)$/);
+  const attempts = [];
+  if (m) attempts.push({ title: m[2], artist: m[1], why: 'parsed "Artist - Title"' });
+  attempts.push({ title, artist, why: 'as tagged' });
+  attempts.push({ title: m ? m[2] : title, artist: null, why: 'title + duration only' });
+  for (const t of attempts) {
+    const p = await findPoster({ title: t.title, artist: t.artist, duration });
+    log(`poster attempt (${t.why}) title="${t.title}" artist="${t.artist || ''}" -> ${p ? 'match deezer=' + p.deezerId : 'no match'}`);
+    if (p) return p;
+  }
+  return null;
 }
 
 // ---------- api ----------
@@ -476,6 +493,27 @@ async function say(ctx, text, replyTo) {
   }
 }
 
+// react to the song file instead of replying. Telegram only allows its fixed reaction set (and whatever the group enables),
+// so try REACT_EMOJI first and fall back to the next one; remember what works so we don't retry bad ones
+const REACT_TRY = [process.env.REACT_EMOJI || '🔥', '👍'];
+const badReact = new Set();
+async function react(ctx, chatId, messageId) {
+  for (const emoji of REACT_TRY) {
+    if (badReact.has(emoji)) continue;
+    try {
+      await ctx.telegram.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji }]);
+      log(`reacted ${emoji} chat=${chatId} msg=${messageId}`);
+      return true;
+    } catch (e) {
+      const d = e.description || e.message;
+      console.error(`[${new Date().toISOString()}] [audio] REACTION FAILED ${emoji} chat=${chatId}: ${d}`);
+      if (/REACTION_INVALID/i.test(d)) badReact.add(emoji); // not an allowed reaction, don't try again
+      else return false;                                     // permissions/other error: no point trying another emoji
+    }
+  }
+  return false;
+}
+
 const extOf = (name, mime) =>
   (name && name.includes('.') ? name.split('.').pop() : (mime || '').split('/').pop() || 'mp3')
     .toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp3';
@@ -561,7 +599,7 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
 
     // better-quality poster from Deezer (title + artist search, regex-matched)
     try {
-      const p = await findPoster({
+      const p = await findPosterSmart({
         title: song.title || (a.file_name || '').replace(/\.[^.]+$/, ''),
         artist: song.artist,
         duration: song.duration,
@@ -574,6 +612,20 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
         log(`poster uploaded deezer=${p.deezerId} ${pr.short_url}`);
       } else log('poster: no deezer match');
     } catch (e) { console.warn(`[${new Date().toISOString()}] [audio] poster failed:`, e.message); }
+
+    // last resort: Telegram's own thumbnail of the audio message
+    if (!song.poster_url && !song.cover_url && song.tg_thumb_file_id) {
+      try {
+        const tl = await ctx.telegram.getFileLink(song.tg_thumb_file_id);
+        const tr = await fetch(tl);
+        if (tr.ok) {
+          const tb = Buffer.from(await tr.arrayBuffer());
+          const up = await uploadToHost(tb, `${a.file_unique_id}_thumb.jpg`, 'image/jpeg');
+          song.cover_url = up.short_url;
+          log(`telegram thumbnail used as cover ${up.short_url}`);
+        }
+      } catch (e) { console.warn(`[${new Date().toISOString()}] [audio] thumb fallback failed:`, e.message); }
+    }
 
     // upload the audio
     const r = await uploadToHost(buf, `${a.file_unique_id}.${ext}`, a.mime_type || 'audio/mpeg');
@@ -609,7 +661,11 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
   log(`saved song_id=${song.song_id} uploaded=${song.uploaded} user=${who(from)} playlist=/playlist/${from.id} total_time=${Date.now() - t0}ms`);
 
   const label = `${song.title}${song.artist ? ' — ' + song.artist : ''}`;
-  await say(ctx, song.uploaded ? `✅ Saved: ${label}` : `⚠️ Logged (not uploaded: ${song.upload_error}): ${label}`, message_id);
+  if (song.uploaded) {
+    if (!(await react(ctx, chat.id, message_id))) await say(ctx, `✅ Saved: ${label}`, message_id); // fall back to a reply only if reacting is impossible here
+  } else {
+    await say(ctx, `⚠️ Logged (not uploaded: ${song.upload_error}): ${label}`, message_id);
+  }
 }
 
 // ---------- handlers ----------
