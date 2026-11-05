@@ -122,7 +122,7 @@ details summary::after{content:" +"}details[open] summary::after{content:" –"}
       <dl class="grid" id="infoGrid"><dt>–</dt><dd>Select a track</dd></dl>
       <div class="links" id="infoLinks"></div>
     </details>
-    <audio id="audio" preload="auto"></audio>
+    <audio id="audio" preload="metadata"></audio>
   </section>
 
   <section class="card">
@@ -212,12 +212,14 @@ details summary::after{content:" +"}details[open] summary::after{content:" –"}
 
   function play(i) {
     const s = S.songs[i]; if (!ok(s)) return;
-    S.cur = i; audio.src = s.listen_url; audio.play().catch(() => {});
+    S.cur = i; S.counted = null; S.tried = false;
+    audio.src = s.hf_url || s.listen_url; // direct file = streams right away; listen_url only as fallback
+    audio.play().catch(() => {});
     setHue(hueOf(s.song_id));
     $('npT').textContent = s.title || 'Unknown'; $('npA').textContent = s.artist || 'Unknown artist';
     $('art').innerHTML = img(s) ? `<img src="${esc(img(s))}" alt="">` : '♪';
     $('seek').value = 0; fill($('seek')); $('tCur').textContent = '0:00'; $('tDur').textContent = fmt(s.duration);
-    info(s); renderList(); media(s); fresh(s);
+    info(s); renderList(); media(s);
   }
   const toggle = () => { if (S.cur < 0) { const f = S.songs.findIndex(ok); if (f >= 0) { order(f); play(f); } return; } audio.paused ? audio.play() : audio.pause(); };
 
@@ -229,7 +231,20 @@ details summary::after{content:" +"}details[open] summary::after{content:" –"}
 
   audio.addEventListener('ended', () => S.repeat === 2 ? (audio.currentTime = 0, audio.play()) : step(1));
   ['play', 'pause'].forEach(ev => audio.addEventListener(ev, () => { $('bPlay').textContent = audio.paused ? '▶' : '⏸'; renderList(); }));
-  audio.addEventListener('error', () => { if (S.cur >= 0) $('npA').textContent = '⚠ Could not play this file'; });
+  // count the listen once per track when audio actually starts (direct urls skip /listen, so we ping it)
+  audio.addEventListener('playing', () => {
+    const s = S.songs[S.cur]; if (!s) return;
+    $('npA').textContent = s.artist || 'Unknown artist';
+    if (S.counted === s.song_id) return;
+    S.counted = s.song_id;
+    if (s.listen_url) fetch(s.listen_url, { method: 'POST', keepalive: true }).then(() => fresh(s)).catch(() => {});
+  });
+  audio.addEventListener('waiting', () => { if (S.cur >= 0) $('npA').textContent = 'Buffering…'; });
+  audio.addEventListener('error', () => {
+    const s = S.songs[S.cur]; if (!s) return;
+    if (!S.tried && s.hf_url && s.listen_url) { S.tried = true; audio.src = s.listen_url; audio.play().catch(() => {}); return; } // fallback path
+    $('npA').textContent = '⚠ Could not play this file';
+  });
 
   let drag = false;
   audio.addEventListener('timeupdate', () => {
@@ -248,7 +263,7 @@ details summary::after{content:" +"}details[open] summary::after{content:" –"}
       ['Added', s.created_at && new Date(s.created_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })], ['Song ID', s.song_id]]
       .filter(r => r[1] !== null && r[1] !== undefined && r[1] !== '' && r[1] !== false);
     $('infoGrid').innerHTML = rows.map(([k, v, raw]) => `<dt>${k}</dt><dd>${raw ? v : esc(v)}</dd>`).join('');
-    $('infoLinks').innerHTML = (s.listen_url ? `<a href="${esc(s.listen_url)}" target="_blank" rel="noopener">File</a>` : '') + (s.info_url ? `<a href="${esc(s.info_url)}" target="_blank" rel="noopener">JSON</a>` : '');
+    $('infoLinks').innerHTML = ((s.hf_url || s.listen_url) ? `<a href="${esc(s.hf_url || s.listen_url)}" target="_blank" rel="noopener">File</a>` : '') + (s.info_url ? `<a href="${esc(s.info_url)}" target="_blank" rel="noopener">JSON</a>` : '');
   }
   async function fresh(s) { // refresh listen count once the /listen hit registered
     if (!s.info_url) return;
