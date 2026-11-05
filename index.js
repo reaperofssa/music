@@ -233,6 +233,58 @@ const shapeUser = u => u && ({
   song_count: u.song_count || 0,
 });
 
+// ---------- genre capsules + appearance (pure helpers) ----------
+const escRx = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const exactRx = s => new RegExp('^\\s*' + escRx(String(s).trim()) + '\\s*$', 'i');   // case-insensitive exact (arrays match per element)
+// a genre capsule has no stored membership: it is every song of the user tagged with that genre,
+// plus songs the owner pinned in (include), minus songs the owner removed (excluded)
+const capFilter = (uid, c) => ({
+  user_id: uid,
+  $or: [{ genre: exactRx(c.genre) }, { song_id: { $in: c.include || [] } }],
+  song_id: { $nin: c.excluded || [] },
+});
+
+const HEX = /^#[0-9a-f]{6}$/i;
+const THEME_ENUM = {
+  mode: ['auto', 'light', 'dark'],
+  font: ['system', 'serif', 'mono', 'rounded', 'display', 'condensed'],
+  radius: ['sharp', 'soft', 'round'],
+  card: ['solid', 'glass', 'outline'],
+  effect: ['none', 'petals', 'snow', 'stars', 'hearts', 'fireflies', 'rain', 'bubbles', 'leaves'],
+  effectDensity: ['low', 'med', 'high'],
+  avatarShape: ['round', 'squircle', 'square'],
+  hero: ['auto', 'center', 'left'],
+  heroCover: ['art', 'avatar'],
+  coverShape: ['square', 'soft', 'round'],
+  density: ['comfy', 'compact'],
+  player: ['solid', 'glass'],
+};
+const THEME_NUM = { gradAngle: [0, 360], effectSpeed: [0.3, 2.5], bgBlur: [0, 24], bgDim: [0, 85] };
+const THEME_BOOL = ['artColor', 'heroGlow', 'showPlays', 'showStats'];
+const THEME_HEX = ['bg', 'accent', 'bg2', 'effectColor'];
+// whitelist everything: the page puts these straight into CSS variables / attributes
+function cleanTheme(i, prev = {}) {
+  const o = {};
+  i = i && typeof i === 'object' ? i : {};
+  for (const k of THEME_HEX) if (typeof i[k] === 'string' && HEX.test(i[k])) o[k] = i[k].toLowerCase();
+  for (const [k, list] of Object.entries(THEME_ENUM)) if (list.includes(i[k])) o[k] = i[k];
+  for (const [k, [lo, hi]] of Object.entries(THEME_NUM)) { const n = Number(i[k]); if (Number.isFinite(n)) o[k] = Math.min(hi, Math.max(lo, n)); }
+  for (const k of THEME_BOOL) if (typeof i[k] === 'boolean') o[k] = i[k];
+  if (typeof i.bio === 'string') { const b = i.bio.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140); if (b) o.bio = b; }
+  if (prev.avatar) o.avatar = prev.avatar;          // images are only ever changed through the upload endpoints
+  if (prev.bgImage) o.bgImage = prev.bgImage;
+  return o;
+}
+function sniffImage(b) {
+  if (b.length < 12) return null;
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return { mime: 'image/png', ext: '.png' };
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { mime: 'image/jpeg', ext: '.jpg' };
+  if (b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') return { mime: 'image/webp', ext: '.webp' };
+  if (b.toString('ascii', 0, 4) === 'GIF8') return { mime: 'image/gif', ext: '.gif' };
+  return null;
+}
+const imgUploads = new Map();   // uid -> upload timestamps (simple hourly cap)
+
 // queue helpers (pure)
 const shuffleArr = a => {
   for (let i = a.length - 1; i > 0; i--) {
@@ -328,19 +380,24 @@ function startApi({ songs, users, queues }) {
 
     // scope: all songs, or one capsule (its order lives in capsule_songs)
     const scope = String(req.query.capsule || 'all');
-    let cap = { id: 'all', name: 'All' }, ids = null;
+    let cap = { id: 'all', name: 'All' }, ids = null, gcap = null;
     if (scope !== 'all') {
       const c = await capsules.findOne({ _id: scope, user_id: uid });
       if (!c) return res.status(404).json({ error: 'capsule not found' });
-      cap = { id: c._id, name: c.name };
-      ids = (await capSongs.find({ capsule_id: c._id }).sort({ pos: 1 }).project({ song_id: 1 }).toArray()).map(x => x.song_id);
+      cap = { id: c._id, name: c.name, genre: c.genre || null };
+      if (c.genre) gcap = c;
+      else ids = (await capSongs.find({ capsule_id: c._id }).sort({ pos: 1 }).project({ song_id: 1 }).toArray()).map(x => x.song_id);
     }
-    const base = ids ? { user_id: uid, song_id: { $in: ids } } : { user_id: uid };
-    const filter = { ...base };
+    const base = gcap ? capFilter(uid, gcap) : ids ? { user_id: uid, song_id: { $in: ids } } : { user_id: uid };
+    const conds = [base];
     if (q) {
-      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-      filter.$or = ['title', 'artist', 'album', 'album_artist', 'genre', 'label'].map(f => ({ [f]: rx })); // arrays (genre) match per element
+      const rx = new RegExp(escRx(q), 'i');
+      conds.push({ $or: ['title', 'artist', 'album', 'album_artist', 'genre', 'label'].map(f => ({ [f]: rx })) }); // arrays (genre) match per element
     }
+    const fArtist = String(req.query.artist || '').trim().slice(0, 200), fGenre = String(req.query.genre || '').trim().slice(0, 100);
+    if (fArtist) conds.push({ artist: exactRx(fArtist) });
+    if (fGenre) conds.push({ genre: exactRx(fGenre) });
+    const filter = conds.length > 1 ? { $and: conds } : base;
     const skip = (page - 1) * limit;
 
     let total, items;
@@ -418,12 +475,14 @@ function startApi({ songs, users, queues }) {
   const imgOf = s => s.image_url || s.poster_url || s.cover_url || null;
   const dupKey = e => e?.code === 11000;
 
-  async function coversOf(uid, capsuleId) {
+  async function coversOf(uid, c) {
+    const P = { image_url: 1, poster_url: 1, cover_url: 1 };
     let docs;
-    if (capsuleId === 'all') docs = await songs.find({ user_id: uid }).sort(SORTS.def).limit(40).project({ image_url: 1, poster_url: 1, cover_url: 1 }).toArray();
+    if (c._id === 'all') docs = await songs.find({ user_id: uid }).sort(SORTS.def).limit(40).project(P).toArray();
+    else if (c.genre) docs = await songs.find(capFilter(uid, c)).sort(SORTS.def).limit(40).project(P).toArray();
     else {
-      const ids = (await capSongs.find({ capsule_id: capsuleId }).sort({ pos: 1 }).limit(24).project({ song_id: 1 }).toArray()).map(x => x.song_id);
-      const m = new Map((await songs.find({ song_id: { $in: ids } }).project({ song_id: 1, image_url: 1, poster_url: 1, cover_url: 1 }).toArray()).map(x => [x.song_id, x]));
+      const ids = (await capSongs.find({ capsule_id: c._id }).sort({ pos: 1 }).limit(24).project({ song_id: 1 }).toArray()).map(x => x.song_id);
+      const m = new Map((await songs.find({ song_id: { $in: ids } }).project({ song_id: 1, ...P }).toArray()).map(x => [x.song_id, x]));
       docs = ids.map(i => m.get(i)).filter(Boolean);
     }
     return docs.map(imgOf).filter(Boolean).slice(0, 4);
@@ -442,8 +501,9 @@ function startApi({ songs, users, queues }) {
       capSongs.aggregate([{ $match: { user_id: uid } }, { $group: { _id: '$capsule_id', n: { $sum: 1 } } }]).toArray(),
     ]);
     const n = new Map(counts.map(c => [c._id, c.n]));
-    const out = await Promise.all([{ _id: 'all', name: 'All', count: total }, ...caps.map(c => ({ _id: c._id, name: c.name, count: n.get(c._id) || 0 }))]
-      .map(async c => ({ id: c._id, name: c.name, count: c.count, covers: await coversOf(uid, c._id) })));
+    const gCount = new Map(await Promise.all(caps.filter(c => c.genre).map(async c => [c._id, await songs.countDocuments(capFilter(uid, c))])));
+    const out = await Promise.all([{ _id: 'all', name: 'All', count: total }, ...caps.map(c => ({ _id: c._id, name: c.name, genre: c.genre || null, include: c.include, excluded: c.excluded, count: c.genre ? gCount.get(c._id) : n.get(c._id) || 0 }))]
+      .map(async c => ({ id: c._id, name: c.name, genre: c.genre || null, count: c.count, covers: await coversOf(uid, c) })));
     res.json({ user: shapeUser(u), count: caps.length, capsules: out });
   }));
 
@@ -454,6 +514,111 @@ function startApi({ songs, users, queues }) {
     const c = { _id: crypto.randomBytes(5).toString('hex'), user_id: req.uid, name, name_key: name.toLowerCase(), created_at: new Date() };
     try { await capsules.insertOne(c); } catch (e) { if (dupKey(e)) return res.status(409).json({ error: 'you already have a capsule with that name' }); throw e; }
     res.status(201).json({ id: c._id, name: c.name, count: 0 });
+  }));
+
+  // ===== facets, genre capsules, appearance =====
+  const cleanQ = req => ({ q: String(req.query.q || '').trim().slice(0, 100), artist: String(req.query.artist || '').trim().slice(0, 200), genre: String(req.query.genre || '').trim().slice(0, 100) });
+  const songFilter = (uid, { q, artist, genre }) => {
+    const conds = [{ user_id: uid }];
+    if (q) { const rx = new RegExp(escRx(q), 'i'); conds.push({ $or: ['title', 'artist', 'album', 'album_artist', 'genre', 'label'].map(f => ({ [f]: rx })) }); }
+    if (artist) conds.push({ artist: exactRx(artist) });
+    if (genre) conds.push({ genre: exactRx(genre) });
+    return conds.length > 1 ? { $and: conds } : conds[0];
+  };
+
+  // artists + genres in the owner's library (for filters and the "turn genre into capsule" picker)
+  app.get('/me/facets', auth, wrap(async (req, res) => {
+    const [artists, genres, caps] = await Promise.all([
+      songs.aggregate([{ $match: { user_id: req.uid, artist: { $type: 'string', $ne: '' } } },
+        { $group: { _id: { $toLower: { $trim: { input: '$artist' } } }, name: { $first: '$artist' }, n: { $sum: 1 } } },
+        { $sort: { n: -1, _id: 1 } }, { $limit: 500 }]).toArray(),
+      songs.aggregate([{ $match: { user_id: req.uid } },
+        { $project: { g: { $cond: [{ $isArray: '$genre' }, '$genre', { $cond: [{ $ifNull: ['$genre', false] }, ['$genre'], []] }] } } },
+        { $unwind: '$g' }, { $match: { g: { $type: 'string', $ne: '' } } },
+        { $group: { _id: { $toLower: { $trim: { input: '$g' } } }, name: { $first: { $trim: { input: '$g' } } }, n: { $sum: 1 } } },
+        { $sort: { n: -1, _id: 1 } }, { $limit: 300 }]).toArray(),
+      capsules.find({ user_id: req.uid, genre: { $ne: null } }).project({ genre: 1 }).toArray(),
+    ]);
+    const used = new Map(caps.map(c => [String(c.genre).toLowerCase().trim(), c._id]));
+    res.json({
+      artists: artists.map(x => ({ name: x.name, count: x.n })),
+      genres: genres.map(x => ({ name: x.name, count: x.n, capsule_id: used.get(x._id) || null })),
+    });
+  }));
+
+  // every song id matching the filters (for "select all N matching"), max 2000
+  app.get('/me/songs/ids', auth, wrap(async (req, res) => {
+    const ids = (await songs.find(songFilter(req.uid, cleanQ(req))).sort(SORTS.artist).limit(MAX_CAPSULE_SONGS).project({ song_id: 1 }).toArray()).map(x => x.song_id);
+    res.json({ ids });
+  }));
+
+  // ids already inside a capsule (the song picker greys them out)
+  app.get('/me/capsules/:cid/ids', auth, wrap(async (req, res) => {
+    const scope = await scopeOf(req, res); if (!scope) return;
+    if (scope === 'all') return res.json({ ids: [] });
+    const c = req.capDoc;
+    const ids = c.genre
+      ? (await songs.find(capFilter(req.uid, c)).limit(5000).project({ song_id: 1 }).toArray()).map(x => x.song_id)
+      : (await capSongs.find({ capsule_id: scope }).project({ song_id: 1 }).toArray()).map(x => x.song_id);
+    res.json({ ids });
+  }));
+
+  // "Turn genre into capsule": a capsule that follows a genre. New songs of that genre show up on their own.
+  app.post('/me/capsules/genre', auth, wrap(async (req, res) => {
+    const genre = cleanName(req.body?.genre);
+    if (!genre) return res.status(400).json({ error: 'genre required' });
+    if (await capsules.countDocuments({ user_id: req.uid }) >= MAX_CAPSULES) return res.status(400).json({ error: `max ${MAX_CAPSULES} capsules` });
+    if (await capsules.findOne({ user_id: req.uid, genre_key: genre.toLowerCase() }, { projection: { _id: 1 } })) return res.status(409).json({ error: 'you already have a capsule for that genre' });
+    const c = { _id: crypto.randomBytes(5).toString('hex'), user_id: req.uid, name: genre, name_key: genre.toLowerCase(), genre, genre_key: genre.toLowerCase(), include: [], excluded: [], created_at: new Date() };
+    try { await capsules.insertOne(c); } catch (e) { if (dupKey(e)) return res.status(409).json({ error: 'you already have a capsule with that name. Rename it first' }); throw e; }
+    res.status(201).json({ id: c._id, name: c.name, genre: c.genre, count: await songs.countDocuments(capFilter(req.uid, c)) });
+  }));
+
+  // ----- playlist page appearance -----
+  app.get('/playlist/:userid/theme', wrap(async (req, res) => {
+    const uid = Number(req.params.userid);
+    if (!Number.isInteger(uid)) return res.status(400).json({ error: 'invalid user id' });
+    const u = await users.findOne({ _id: uid }, { projection: { theme: 1 } });
+    if (!u) return res.status(404).json({ error: 'user not found' });
+    res.set('Cache-Control', 'no-cache');
+    res.json({ theme: u.theme || {} });
+  }));
+
+  app.put('/me/theme', auth, wrap(async (req, res) => {
+    const u = await users.findOne({ _id: req.uid }, { projection: { theme: 1 } });
+    if (!u) return res.status(404).json({ error: 'user not found' });
+    const theme = cleanTheme(req.body?.theme, u.theme || {});
+    await users.updateOne({ _id: req.uid }, { $set: { theme } });
+    res.json({ theme });
+  }));
+
+  app.delete('/me/theme', auth, wrap(async (req, res) => {
+    await users.updateOne({ _id: req.uid }, { $unset: { theme: '' } });
+    res.json({ theme: {} });
+  }));
+
+  // profile picture / background image: the browser resizes first, we validate and store it on Hugging Face like song art
+  app.post('/me/theme/image/:kind', auth, express.raw({ type: 'image/*', limit: '6mb' }), wrap(async (req, res) => {
+    const kind = req.params.kind;
+    if (!['avatar', 'bg'].includes(kind)) return res.status(400).json({ error: 'kind must be avatar or bg' });
+    const buf = req.body;
+    if (!Buffer.isBuffer(buf) || !buf.length) return res.status(400).json({ error: 'send the image as the request body' });
+    const t = sniffImage(buf);
+    if (!t) return res.status(415).json({ error: 'use a PNG, JPEG, WebP or GIF image' });
+    const now = Date.now(), recent = (imgUploads.get(req.uid) || []).filter(x => now - x < 3600e3);
+    if (recent.length >= 15) return res.status(429).json({ error: 'too many uploads, try again later' });
+    imgUploads.set(req.uid, [...recent, now]);
+    const up = await uploadToHost(buf, `profile-${kind}-${req.uid}${t.ext}`, t.mime);
+    const field = kind === 'avatar' ? 'avatar' : 'bgImage';
+    const r = await users.findOneAndUpdate({ _id: req.uid }, { $set: { [`theme.${field}`]: up.short_url } }, { returnDocument: 'after', projection: { theme: 1 } });
+    if (!r) return res.status(404).json({ error: 'user not found' });
+    res.json({ url: up.short_url, theme: r.theme || {} });
+  }));
+
+  app.delete('/me/theme/image/:kind', auth, wrap(async (req, res) => {
+    if (!['avatar', 'bg'].includes(req.params.kind)) return res.status(400).json({ error: 'kind must be avatar or bg' });
+    const r = await users.findOneAndUpdate({ _id: req.uid }, { $unset: { [`theme.${req.params.kind === 'avatar' ? 'avatar' : 'bgImage'}`]: '' } }, { returnDocument: 'after', projection: { theme: 1 } });
+    res.json({ theme: r?.theme || {} });
   }));
 
   app.patch('/me/capsules/:cid', auth, wrap(async (req, res) => {
@@ -477,10 +642,20 @@ function startApi({ songs, users, queues }) {
   // copy songs from All into a capsule (appended at the end; skips ones already inside)
   app.post('/me/capsules/:cid/songs', auth, wrap(async (req, res) => {
     const cid = req.params.cid;
-    if (!(await capsules.findOne({ _id: cid, user_id: req.uid }, { projection: { _id: 1 } }))) return res.status(404).json({ error: 'capsule not found' });
+    const capDoc = await capsules.findOne({ _id: cid, user_id: req.uid });
+    if (!capDoc) return res.status(404).json({ error: 'capsule not found' });
     const raw = Array.isArray(req.body?.song_ids) ? req.body.song_ids : req.body?.song_id ? [req.body.song_id] : [];
     const want = [...new Set(raw.map(String))].slice(0, 200);
     if (!want.length) return res.status(400).json({ error: 'song_ids required' });
+    if (capDoc.genre) {   // genre capsule: adding = un-remove a song, or pin one from another genre
+      const mine = await songs.find({ user_id: req.uid, song_id: { $in: want } }).project({ song_id: 1, genre: 1 }).toArray();
+      const rx = exactRx(capDoc.genre), exc = new Set(capDoc.excluded || []), inc = new Set(capDoc.include || []);
+      const outside = new Set(mine.filter(x => ![].concat(x.genre || []).some(g => rx.test(String(g)))).map(x => x.song_id));
+      const ok = mine.map(x => x.song_id);
+      const added = ok.filter(i => exc.has(i) || (outside.has(i) && !inc.has(i))).length;
+      await capsules.updateOne({ _id: cid }, { $pull: { excluded: { $in: ok } }, $addToSet: { include: { $each: [...outside] } } });
+      return res.json({ added, skipped: want.length - added });
+    }
     const [mine, have, count, last] = await Promise.all([
       songs.find({ user_id: req.uid, song_id: { $in: want } }).project({ song_id: 1 }).toArray(),
       capSongs.find({ capsule_id: cid, song_id: { $in: want } }).project({ song_id: 1 }).toArray(),
@@ -497,7 +672,8 @@ function startApi({ songs, users, queues }) {
   // :cid is a capsule id, or "all" for the main playlist
   const scopeOf = async (req, res) => {
     if (req.params.cid === 'all') return 'all';
-    const c = await capsules.findOne({ _id: req.params.cid, user_id: req.uid }, { projection: { _id: 1 } });
+    const c = await capsules.findOne({ _id: req.params.cid, user_id: req.uid });
+    req.capDoc = c;
     if (!c) res.status(404).json({ error: 'capsule not found' });
     return c?._id || null;
   };
@@ -513,6 +689,7 @@ function startApi({ songs, users, queues }) {
   // body: { index } (0-based in the full list) | { before: song_id } | { after: song_id } | { to: 'top' | 'bottom' }
   app.patch('/me/capsules/:cid/songs/:sid/move', auth, wrap(async (req, res) => {
     const scope = await scopeOf(req, res); if (!scope) return;
+    if (req.capDoc?.genre) return res.status(400).json({ error: 'a genre capsule follows your playlist order' });
     const sid = req.params.sid, { index, before, after, to } = req.body || {};
     const list = await orderOf(req.uid, scope);
     const from = list.findIndex(x => x.id === sid);
@@ -547,6 +724,10 @@ function startApi({ songs, users, queues }) {
       if (!r.deletedCount) return res.status(404).json({ error: 'song not found' });
       await Promise.all([capSongs.deleteMany({ user_id: req.uid, song_id: sid }), users.updateOne({ _id: req.uid }, { $inc: { song_count: -1 } })]);
       return res.json({ ok: true, deleted: true });
+    }
+    if (req.capDoc?.genre) {   // removing from a genre capsule hides the song there (it stays in All and keeps its genre)
+      await capsules.updateOne({ _id: scope }, { $addToSet: { excluded: sid }, $pull: { include: sid } });
+      return res.json({ ok: true, deleted: false });
     }
     const r = await capSongs.deleteOne({ capsule_id: scope, song_id: sid });
     if (!r.deletedCount) return res.status(404).json({ error: 'song not in this capsule' });
@@ -597,7 +778,10 @@ function startApi({ songs, users, queues }) {
     const { song_id, user_id, hot, shuffle, capsule_id } = req.body || {};
     let ids = [];
     if (user_id != null && capsule_id && capsule_id !== 'all') {
-      const mem = (await capSongs.find({ capsule_id: String(capsule_id), user_id: Number(user_id) }).sort({ pos: 1 }).limit(500).project({ song_id: 1 }).toArray()).map(x => x.song_id);
+      const cdoc = await capsules.findOne({ _id: String(capsule_id), user_id: Number(user_id) });
+      const mem = cdoc?.genre
+        ? (await songs.find(capFilter(Number(user_id), cdoc)).sort(SORTS.def).limit(500).project({ song_id: 1 }).toArray()).map(x => x.song_id)
+        : (await capSongs.find({ capsule_id: String(capsule_id), user_id: Number(user_id) }).sort({ pos: 1 }).limit(500).project({ song_id: 1 }).toArray()).map(x => x.song_id);
       const up = new Set((await songs.find({ song_id: { $in: mem }, uploaded: true }).project({ song_id: 1 }).toArray()).map(x => x.song_id));
       ids = mem.filter(i => up.has(i));
     } else if (user_id != null) {
@@ -1066,6 +1250,8 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   await capSongs.createIndex({ capsule_id: 1, song_id: 1 }, { unique: true });
   await capSongs.createIndex({ capsule_id: 1, pos: 1 });
   await capSongs.createIndex({ user_id: 1, song_id: 1 });
+  await songs.createIndex({ user_id: 1, artist: 1 });
+  await songs.createIndex({ user_id: 1, genre: 1 });
   await songs.createIndex({ user_id: 1, release_date: -1 });
   startApi({ songs, users, queues });
   if (process.env.BACKFILL_DEEZER === '1') backfillDeezer().catch(e => console.error('[deezer backfill] failed:', e));
