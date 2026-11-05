@@ -592,6 +592,12 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
 }
 
 // ---------- handlers ----------
+bot.use((ctx, next) => {
+  const t = ctx.message?.text || ctx.message?.caption || '';
+  if (t.startsWith('/')) log(`update: "${t.split(/\s/)[0]}" chat=${ctx.chat?.id} (${ctx.chat?.type}) from=${who(ctx.from)}`);
+  return next();
+});
+
 bot.command('top', async ctx => {
   const top = await users.find().sort({ song_count: -1 }).limit(10).toArray();
   if (!top.length) return ctx.reply('No songs yet.');
@@ -646,7 +652,7 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   const udb = client.db(UPLOADER_DB);
   hfFiles = udb.collection('xfiles');
   hfSettings = udb.collection('xsettings');
-  await hfFiles.createIndex({ short_code: 1 }, { unique: true });
+  await hfFiles.createIndex({ short_code: 1 }, { unique: true }).catch(e => console.warn('[hf] short_code index skipped:', e.message));
   if (!hfAccounts().length) console.warn('[hf] no Hugging Face accounts configured (HF_USERNAME/HF_TOKEN)');
   users = db.collection('users');
   songs = db.collection('songs');
@@ -661,9 +667,8 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
     const me = await bot.telegram.getMe();
     log(`bot @${me.username} id=${me.id} can_read_all_group_messages=${me.can_read_all_group_messages}${me.can_read_all_group_messages ? '' : '  <-- privacy mode is ON, bot only sees commands/replies in groups'}`);
   } catch (e) { console.error('getMe failed:', e.message); }
-  await bot.launch();
-  console.log('audio bot running');
-})();
+  await bot.launch(() => log('polling started - bot is live, send /upload now'));
+})().catch(e => { console.error('[FATAL] startup failed:', e); process.exit(1); });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
