@@ -74,7 +74,25 @@ async function fetchCover(album) {
   return null;
 }
 
-// returns { buf, deezerId, album } or null
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// genres / release date / label live on the album endpoint (search results don't carry them)
+async function fetchAlbumMeta(albumId) {
+  if (!albumId) return {};
+  try {
+    const r = await fetch(`https://api.deezer.com/album/${albumId}`);
+    if (!r.ok) return {};
+    const a = await r.json();
+    if (a.error) return a.error.code === 4 ? { rateLimited: true } : {};
+    return {
+      genres: (a.genres?.data || []).map(g => g.name).filter(Boolean),
+      releaseDate: a.release_date && a.release_date !== '0000-00-00' ? a.release_date : null,
+      label: a.label || null,
+    };
+  } catch { return {}; }
+}
+
+// returns { buf (may be null), deezerId, album, explicit, genres, releaseDate, label } or null
 async function findPoster({ title, artist, duration }) {
   if (!title) return null;
   const stripBr = x => String(x || '').replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -84,13 +102,14 @@ async function findPoster({ title, artist, duration }) {
   const { data = [] } = await r.json();
   const v = pickMatch(data, { title, artist, duration });
   if (!v) return null;
-  const buf = await fetchCover(v.album);
-  return buf ? { buf, deezerId: v.id, album: v.album?.title || null } : null;
+  const [buf, meta] = await Promise.all([fetchCover(v.album), fetchAlbumMeta(v.album?.id)]);
+  return { buf, deezerId: v.id, album: v.album?.title || null, explicit: v.explicit_lyrics ?? null, ...meta };
 }
 
 // YouTube-style uploads put the channel in "artist" and "Artist - Title (Official Video)" in the title,
 // so try: parsed from title -> as tagged -> title only (duration must then match)
 async function findPosterSmart({ title, artist, duration }) {
+  let fallback = null;
   const m = String(title || '').match(/^(.+?)\s+[-–—]\s+(.+)$/);
   const attempts = [];
   if (m) attempts.push({ title: m[2], artist: m[1], why: 'parsed "Artist - Title"' });
@@ -98,16 +117,67 @@ async function findPosterSmart({ title, artist, duration }) {
   attempts.push({ title: m ? m[2] : title, artist: null, why: 'title + duration only' });
   for (const t of attempts) {
     const p = await findPoster({ title: t.title, artist: t.artist, duration });
-    log(`poster attempt (${t.why}) title="${t.title}" artist="${t.artist || ''}" -> ${p ? 'match deezer=' + p.deezerId : 'no match'}`);
-    if (p) return p;
+    log(`poster attempt (${t.why}) title="${t.title}" artist="${t.artist || ''}" -> ${p ? 'match deezer=' + p.deezerId + (p.buf ? '' : ' (no cover)') : 'no match'}`);
+    if (p?.buf) return p;
+    if (p && !fallback) fallback = p; // matched but no cover: keep the metadata, keep trying for a cover
   }
-  return null;
+  return fallback;
+}
+
+// copies Deezer metadata onto a song object without overwriting what the file's own tags already gave us
+function applyDeezerMeta(song, p) {
+  song.deezer_id = p.deezerId;
+  if (!song.album) song.album = p.album;
+  const hasGenre = Array.isArray(song.genre) ? song.genre.length : song.genre;
+  if (!hasGenre && p.genres?.length) song.genre = p.genres;
+  if (p.releaseDate) {
+    song.release_date = p.releaseDate;
+    if (!song.year) song.year = Number(p.releaseDate.slice(0, 4)) || null;
+  }
+  if (p.label) song.label = p.label;
+  if (p.explicit != null) song.explicit = !!p.explicit;
+  song.deezer_meta = !p.rateLimited;
+}
+
+// one-off: fill genre / release date / label for songs saved before this existed (run with BACKFILL_DEEZER=1)
+async function backfillDeezer() {
+  const cur = songs.find({ deezer_id: { $ne: null }, deezer_meta: { $ne: true } }).project({ deezer_id: 1, album: 1, genre: 1, year: 1 });
+  let done = 0, miss = 0;
+  for await (const s of cur) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let meta = {}, explicit = null;
+      try {
+        const r = await fetch(`https://api.deezer.com/track/${s.deezer_id}`);
+        const t = r.ok ? await r.json() : {};
+        if (t.error?.code === 4) { await sleep(6000); continue; }   // Deezer quota: ~50 req / 5s
+        explicit = t.explicit_lyrics ?? null;
+        meta = await fetchAlbumMeta(t.album?.id);
+      } catch {}
+      if (meta.rateLimited) { await sleep(6000); continue; }
+      const song = { album: s.album, genre: s.genre, year: s.year };
+      applyDeezerMeta(song, { deezerId: s.deezer_id, album: null, explicit, ...meta });
+      const { deezer_id, ...set } = song;
+      await songs.updateOne({ _id: s._id }, { $set: set });
+      meta.releaseDate || meta.genres?.length ? done++ : miss++;
+      break;
+    }
+    await sleep(200);
+  }
+  log(`deezer backfill finished: ${done} updated, ${miss} had no data`);
 }
 
 // ---------- api ----------
 const BASE = (process.env.BASE_URL || '').replace(/\/$/, '');
 const PER_PAGE = 80;
 const HOT_LIMIT = 60;
+// _id last = stable order across pages when the sort key ties
+const SORTS = {
+  def: { created_at: -1, _id: -1 },
+  title: { title: 1, _id: 1 },
+  artist: { artist: 1, title: 1, _id: 1 },
+  plays: { listens: -1, created_at: -1, _id: -1 },
+  released: { release_date: -1, created_at: -1, _id: -1 },
+};
 const LISTEN_WINDOW = 30 * 60 * 1000; // same IP counts once per song per 30 min
 const BOT_UA = /bot|crawler|spider|preview|telegram|facebookexternalhit|whatsapp/i;
 
@@ -215,20 +285,33 @@ function startApi({ songs, users, queues }) {
     const uid = Number(req.params.userid);
     if (!Number.isInteger(uid)) return res.status(400).json({ error: 'invalid user id' });
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(PER_PAGE, Math.max(1, parseInt(req.query.limit, 10) || PER_PAGE));
+    const q = String(req.query.q || '').trim().slice(0, 100);
+    const sortKey = Object.hasOwn(SORTS, req.query.sort) ? req.query.sort : 'def';
 
     const u = await users.findOne({ _id: uid });
     if (!u) return res.status(404).json({ error: 'user not found' });
 
-    const [total, items] = await Promise.all([
-      songs.countDocuments({ user_id: uid }),
-      songs.find({ user_id: uid }).sort({ created_at: -1 }).skip((page - 1) * PER_PAGE).limit(PER_PAGE).toArray(),
+    const filter = { user_id: uid };
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = ['title', 'artist', 'album', 'album_artist', 'genre', 'label'].map(f => ({ [f]: rx })); // arrays (genre) match per element
+    }
+
+    const [total, items, agg] = await Promise.all([
+      songs.countDocuments(filter),
+      songs.find(filter).collation({ locale: 'en', strength: 2 }).sort(SORTS[sortKey]).skip((page - 1) * limit).limit(limit).toArray(),
+      page === 1 ? songs.aggregate([{ $match: { user_id: uid } },
+        { $group: { _id: null, listens: { $sum: '$listens' }, duration: { $sum: '$duration' }, songs: { $sum: 1 } } }]).toArray() : [],
     ]);
     res.json({
       user: shapeUser(u),
       page,
-      per_page: PER_PAGE,
-      total,
-      pages: Math.ceil(total / PER_PAGE),
+      per_page: limit,
+      total,                                  // matches for this q (== all songs when q is empty)
+      pages: Math.ceil(total / limit),
+      q, sort: sortKey,
+      ...(page === 1 && { stats: { songs: agg[0]?.songs || 0, listens: agg[0]?.listens || 0, duration: agg[0]?.duration || 0 } }),
       songs: items.map(shapeSong),
     });
   }));
@@ -554,6 +637,7 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
     upload_url: null, hf_url: null, upload_code: null,
     cover_url: null,
     album: null, album_artist: null, year: null, genre: null,
+    release_date: null, label: null, explicit: null, deezer_meta: false,
     track_no: null, bitrate: null, sample_rate: null, codec: null,
     uploaded: false, upload_error: null,
     song_id: await genSongId(),
@@ -605,11 +689,13 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false) {
         duration: song.duration,
       });
       if (p) {
-        const pr = await uploadToHost(p.buf, `${a.file_unique_id}_poster.jpg`, 'image/jpeg');
-        song.poster_url = pr.short_url;
-        song.deezer_id = p.deezerId;
-        if (!song.album) song.album = p.album;
-        log(`poster uploaded deezer=${p.deezerId} ${pr.short_url}`);
+        applyDeezerMeta(song, p);
+        log(`deezer meta deezer=${p.deezerId} genre=${JSON.stringify(song.genre)} released=${song.release_date} label="${song.label || ''}"`);
+        if (p.buf) {
+          const pr = await uploadToHost(p.buf, `${a.file_unique_id}_poster.jpg`, 'image/jpeg');
+          song.poster_url = pr.short_url;
+          log(`poster uploaded deezer=${p.deezerId} ${pr.short_url}`);
+        }
       } else log('poster: no deezer match');
     } catch (e) { console.warn(`[${new Date().toISOString()}] [audio] poster failed:`, e.message); }
 
@@ -738,7 +824,10 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   await songs.createIndex({ song_id: 1 }, { unique: true, sparse: true });
   await songs.createIndex({ user_id: 1, created_at: -1 });
   await songs.createIndex({ listens: -1, created_at: -1 });
+  await songs.createIndex({ user_id: 1, listens: -1, created_at: -1 });
+  await songs.createIndex({ user_id: 1, release_date: -1 });
   startApi({ songs, users, queues });
+  if (process.env.BACKFILL_DEEZER === '1') backfillDeezer().catch(e => console.error('[deezer backfill] failed:', e));
   try {
     const me = await bot.telegram.getMe();
     log(`bot @${me.username} id=${me.id} can_read_all_group_messages=${me.can_read_all_group_messages}${me.can_read_all_group_messages ? '' : '  <-- privacy mode is ON, bot only sees commands/replies in groups'}`);
