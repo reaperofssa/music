@@ -11,14 +11,16 @@
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{background:var(--bg);color:var(--text);font:13px/1.4 "Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
 body{min-height:100svh;padding-bottom:calc(84px + env(safe-area-inset-bottom))}
-button,input{font:inherit;color:inherit}
+button,input,textarea{font:inherit;color:inherit}
 button{background:none;border:0;cursor:pointer}
 a{color:inherit;text-decoration:none}
 svg{width:1em;height:1em;fill:currentColor;display:block}
 :focus-visible{outline:2px solid #fff;outline-offset:2px}
+[hidden]{display:none!important}
 .num{font-variant-numeric:tabular-nums}
 .ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.wrap{max-width:760px;margin:0 auto;padding:0 16px}
+.wrap{max-width:760px;margin:0 auto;padding:0 16px;transition:max-width .2s}
+.wrap.wide{max-width:980px}
 .hd{display:flex;align-items:center;gap:8px;padding:max(14px,env(safe-area-inset-top)) 0 4px}
 .brand{font-weight:800;font-size:15px;letter-spacing:-.02em}
 .brand i{display:inline-block;width:8px;height:8px;border-radius:50%;background:#fff;margin-right:7px}
@@ -31,21 +33,43 @@ svg{width:1em;height:1em;fill:currentColor;display:block}
 h1{font-size:clamp(24px,6vw,36px);font-weight:800;letter-spacing:-.03em;margin:14px 0 2px}
 .meta{color:var(--mut);font-size:12px}
 
+/* loading */
+@keyframes sh{to{background-position:-200% 0}}
+@keyframes fi{from{opacity:0;transform:translateY(6px)}}
+.sk{background:linear-gradient(90deg,var(--s2) 25%,var(--s3) 50%,var(--s2) 75%);background-size:200% 100%;animation:sh 1.3s linear infinite;border-radius:5px}
+.fade{animation:fi .35s ease both}
+img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
+.th:has(img:not(.ld)){background:linear-gradient(90deg,var(--s2) 25%,var(--s3) 50%,var(--s2) 75%);background-size:200% 100%;animation:sh 1.3s linear infinite}
+.skr{display:grid;grid-template-columns:36px 1fr;gap:10px;align-items:center;padding:7px 6px}
+@media(prefers-reduced-motion:reduce){.sk,.fade,.th:has(img:not(.ld)){animation:none}}
+
+/* tabs */
+.tabs{display:flex;align-items:center;gap:6px;padding:12px 0 2px}
+.tabs .t{height:32px;padding:0 16px;border-radius:99px;background:var(--s2);font-size:12px;font-weight:700}
+.tabs .t.on{background:#fff;color:#000}
+.tabs .st{font-size:11px;color:var(--mut)}
+
 .chips{display:flex;gap:6px;overflow-x:auto;padding:14px 0 10px;scrollbar-width:none}
 .chips::-webkit-scrollbar{display:none}
-.chip{flex:none;height:32px;padding:0 14px;border-radius:99px;background:var(--s2);font-size:12px;font-weight:600}
+.chip{flex:none;height:32px;padding:0 14px;border-radius:99px;background:var(--s2);font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px}
 .chip:hover{background:var(--s3)}
 .chip.on{background:#fff;color:#000}
-.chip small{color:var(--dim);margin-left:6px;font-weight:500}.chip.on small{color:#555}
+.chip small{color:var(--dim);font-weight:500}.chip.on small{color:#555}
+.chip svg{font-size:12px;opacity:.7}
 .chip.add{background:none;border:1px dashed var(--s3);color:var(--mut)}
 
-.tb{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:6px;padding:8px 0;background:linear-gradient(var(--bg) 85%,transparent)}
-.search{display:flex;align-items:center;gap:7px;height:32px;padding:0 10px;border-radius:99px;background:var(--s2);flex:1;max-width:260px;min-width:0}
+.tb{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:6px;padding:8px 0;background:linear-gradient(var(--bg) 85%,transparent);flex-wrap:wrap}
+.search{display:flex;align-items:center;gap:7px;height:32px;padding:0 10px;border-radius:99px;background:var(--s2);flex:1;max-width:260px;min-width:120px}
 .search:focus-within{background:var(--s3)}
+.search.wide{max-width:none;width:100%;flex:none}
 .search svg{font-size:14px;color:var(--mut);flex:none}
 .search input{flex:1;min-width:0;background:none;border:0;outline:0;font-size:13px}
 .search input::placeholder{color:var(--dim)}
-.tools{display:flex;gap:6px}
+.tools{display:flex;gap:6px;flex-wrap:wrap}
+.flt{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:2px 0 6px}
+.fc{height:26px;padding:0 6px 0 11px;border-radius:99px;background:var(--s3);font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px}
+.fc svg{font-size:14px;color:var(--mut)}
+.note{color:var(--mut);font-size:12px;padding:2px 0 8px}
 
 .r{display:grid;grid-template-columns:26px 36px minmax(0,1fr) auto;gap:10px;align-items:center;padding:5px 6px;border-radius:5px;min-height:50px}
 .r:hover{background:var(--s1)}.r.sel{background:var(--s2)}
@@ -53,6 +77,7 @@ h1{font-size:clamp(24px,6vw,36px);font-weight:800;letter-spacing:-.03em;margin:1
 .ck input{appearance:none;-webkit-appearance:none;width:16px;height:16px;border-radius:4px;border:1.5px solid var(--dim);background:none;cursor:pointer;display:grid;place-items:center}
 .ck input:checked{background:#fff;border-color:#fff}
 .ck input:checked::after{content:"";width:8px;height:4px;border:solid #000;border-width:0 0 2px 2px;transform:rotate(-45deg) translate(1px,-1px)}
+.ck input:disabled{opacity:.35;cursor:default}
 .th{width:36px;height:36px;border-radius:3px;background:var(--s3);display:grid;place-items:center;font-size:13px;color:var(--dim);overflow:hidden}
 .th img{width:100%;height:100%;object-fit:cover;filter:grayscale(1)}
 .t{font-weight:600;font-size:13px}.a{color:var(--mut);font-size:12px}
@@ -64,65 +89,144 @@ h1{font-size:clamp(24px,6vw,36px);font-weight:800;letter-spacing:-.03em;margin:1
 .more{text-align:center;color:var(--dim);font-size:11px;padding:10px;min-height:24px}
 
 .selbar{position:fixed;left:0;right:0;bottom:0;z-index:40;background:#000;border-top:1px solid var(--line);padding:10px 16px max(10px,env(safe-area-inset-bottom));display:flex;align-items:center;gap:6px;justify-content:center;flex-wrap:wrap}
-.selbar[hidden]{display:none}
 .selbar b{margin-right:auto;font-size:12px}
 .ov{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.6);display:none;place-items:end center}
 .ov.show{display:grid}
 .box{width:min(420px,100%);max-height:80svh;overflow:auto;background:var(--s1);border:1px solid var(--line);border-radius:14px 14px 0 0;padding:14px 14px max(14px,env(safe-area-inset-bottom))}
-@media(min-width:720px){.ov{place-items:center}.box{border-radius:12px}}
+.box.big{width:min(560px,100%);height:88svh;max-height:88svh;display:flex;flex-direction:column;overflow:hidden}
+@media(min-width:720px){.ov{place-items:center}.box{border-radius:12px}.box.big{height:80svh}}
 .bt{font-size:14px;font-weight:700;margin-bottom:6px}
 .box p{margin-bottom:4px}
-.box input{width:100%;height:38px;border-radius:6px;background:var(--s2);border:1px solid var(--s3);padding:0 10px;outline:0;margin:8px 0 12px;font-size:14px}
+.box input[type=text],.box input:not([type]){width:100%;height:38px;border-radius:6px;background:var(--s2);border:1px solid var(--s3);padding:0 10px;outline:0;margin:8px 0 12px;font-size:14px}
 .box input:focus{border-color:#fff}
 .btns{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
 .b{height:34px;padding:0 16px;border-radius:6px;background:var(--s2);font-weight:600}
 .b.pri{background:#fff;color:#000}
-.it{display:block;width:100%;text-align:left;padding:11px 8px;border-radius:5px;font-size:14px}
+.b[disabled]{opacity:.4;cursor:default}
+.it{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;text-align:left;padding:11px 8px;border-radius:5px;font-size:14px}
 .it:hover{background:var(--s2)}
+.it small{color:var(--mut);font-size:12px}
+.it.off{opacity:.45;cursor:default}.it.off:hover{background:none}
+.it .d{display:block;color:var(--mut);font-size:12px;margin-top:2px}
+.fl2{max-height:48svh;overflow:auto;margin:0 -4px}
 .toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translate(-50%,10px);background:#fff;color:#000;padding:8px 14px;border-radius:6px;font-weight:600;font-size:12px;opacity:0;pointer-events:none;transition:.2s;z-index:90;max-width:90vw}
 .toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* song picker */
+.pk{display:flex;flex-direction:column;min-height:0;flex:1}
+.pk .tools2{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.pk .bar2{display:flex;align-items:center;gap:6px;padding:4px 0 8px;border-bottom:1px solid var(--line);font-size:12px;color:var(--mut)}
+.pk-list{flex:1;overflow:auto;margin:0 -6px;min-height:0}
+.pk .r{cursor:pointer}
+.pk .r.in{opacity:.45;cursor:default}
+.pk .tag{font-size:11px;color:var(--mut)}
+
+/* appearance */
+.lk{display:grid;gap:16px;grid-template-areas:"pv" "ctl";padding-top:12px}
+.pvc{grid-area:pv;position:sticky;top:0;z-index:12;background:var(--bg);padding:8px 0}
+.pvf{width:100%;height:250px;border:1px solid var(--line);border-radius:12px;background:#000;display:block}
+.pvh{display:flex;align-items:center;justify-content:space-between;color:var(--mut);font-size:11px;padding:0 2px 6px}
+.ctl{grid-area:ctl;display:grid;gap:12px;min-width:0}
+@media(min-width:900px){.lk{grid-template-columns:minmax(0,1fr) 380px;grid-template-areas:"ctl pv";align-items:start}.pvc{top:8px;padding:0}.pvf{height:min(660px,80svh)}}
+.c2{background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.sh{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.sh h3{font-size:13px;font-weight:700}
+.sh p{color:var(--mut);font-size:11px}
+.fr{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+.fr:first-of-type{border-top:0}
+.fl{font-size:12px;color:var(--mut);flex:none;min-width:84px}
+.fr>.seg,.fr>.rg,.fr>.clr,.fr>.imgc,.fr>textarea{flex:1;min-width:0}
+.seg{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end}
+.seg button{height:28px;padding:0 11px;border-radius:99px;background:var(--s2);font-size:12px;font-weight:600;text-transform:capitalize}
+.seg button:hover{background:var(--s3)}
+.seg button.on{background:#fff;color:#000}
+.rg{display:flex;align-items:center;gap:10px;justify-content:flex-end}
+.rg input{width:100%;max-width:220px;accent-color:#fff}
+.rg output{width:42px;text-align:right;color:var(--mut);font-size:12px}
+.clr{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+.clr input[type=color]{width:44px;height:30px;border:1px solid var(--s3);border-radius:8px;background:none;padding:2px;cursor:pointer}
+.clr.off input{opacity:.35}
+.clr .hex{font-size:12px;color:var(--mut);width:62px;text-align:right}
+.imgc{display:flex;align-items:center;gap:10px;justify-content:flex-end}
+.imt{width:44px;height:44px;border-radius:50%;background:var(--s3) center/cover no-repeat;flex:none;border:1px solid var(--line)}
+.imt.bg{border-radius:8px;width:72px}
+.fr textarea{width:100%;min-height:62px;resize:vertical;border-radius:8px;background:var(--s2);border:1px solid var(--s3);padding:8px 10px;outline:0;font-size:13px}
+.fr textarea:focus{border-color:#fff}
+.sw{position:relative;width:42px;height:24px;flex:none}
+.sw input{position:absolute;inset:0;opacity:0;cursor:pointer;margin:0}
+.sw span{position:absolute;inset:0;border-radius:99px;background:var(--s3);transition:.15s}
+.sw span::after{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:.15s}
+.sw input:checked+span{background:#4ade80}
+.sw input:checked+span::after{transform:translateX(18px)}
+.pre{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px}
+.pre button{height:58px;border-radius:10px;border:1px solid var(--s3);font-size:11px;font-weight:700;display:flex;align-items:flex-end;padding:6px 8px;text-align:left;text-shadow:0 1px 3px rgba(0,0,0,.45)}
+.pre button:hover{border-color:#fff}
+.rall{display:flex;justify-content:center;padding:6px 0 18px}
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" id="wrap">
   <header class="hd"><span class="brand"><i></i>@playlists</span><span class="sub">Manage</span><span class="sp"></span><a class="pill" id="view" href="/" hidden>View playlist</a></header>
   <div class="state" id="gate">Signing in…</div>
+
+  <nav class="tabs" id="tabs" hidden><button class="t on" data-tab="songs">Songs</button><button class="t" data-tab="look">Appearance</button><span class="sp"></span><span class="st" id="saveSt"></span></nav>
+
   <main id="app" hidden>
     <h1 id="title">Your playlist</h1>
-    <div class="meta num" id="meta"></div>
+    <div class="meta" id="meta"></div>
     <nav class="chips" id="chips" aria-label="Capsules"></nav>
     <div class="tb">
       <label class="search"><svg viewBox="0 0 24 24"><path d="M10 3a7 7 0 015.5 11.3l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1110 3zm0 2a5 5 0 100 10 5 5 0 000-10z"/></svg><input type="search" id="q" placeholder="Search" aria-label="Search songs"></label>
+      <button class="pill" id="bFilter">Filter</button>
+      <button class="pill" id="bSelAll" hidden>Select all</button>
       <span class="sp"></span>
-      <span class="tools" id="capTools" hidden><button class="pill" id="bRen">Rename</button><button class="pill" id="bDel">Delete capsule</button></span>
+      <span class="tools" id="capTools" hidden><button class="pill pri" id="bPick">+ Add songs</button><button class="pill" id="bRen">Rename</button><button class="pill" id="bDel">Delete capsule</button></span>
     </div>
+    <div class="flt" id="flt" hidden></div>
     <div id="rows"></div>
     <div class="more" id="more"></div>
   </main>
+
+  <section id="look" hidden>
+    <div class="lk">
+      <div class="pvc"><div class="pvh"><span>Live preview · this is your real page</span><a class="pill" id="pvOpen" href="/" target="_blank">Open</a></div><iframe class="pvf" id="pv" title="Playlist preview"></iframe></div>
+      <div class="ctl" id="ctl"></div>
+    </div>
+  </section>
 </div>
 <div class="selbar" id="selbar" hidden><b class="num" id="selN"></b><button class="pill pri" id="bAdd">Add to capsule</button><button class="pill" id="bRm">Remove</button><button class="pill" id="bClr">Clear</button></div>
 <div class="ov" id="ov"></div><div class="toast" id="toast"></div>
+<input type="file" id="file" accept="image/*" hidden>
 
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const S = { me: null, user: null, caps: [], scope: 'all', songs: [], q: '', page: 0, pages: 1, total: 0, ver: 0, pending: null, ac: null, failed: false, sel: new Set() };
+  const S = { me: null, user: null, caps: [], scope: 'all', songs: [], q: '', artist: '', genre: '', page: 0, pages: 1, total: 0, ver: 0, pending: null, ac: null, failed: false,
+    sel: new Set(), tab: 'songs', facets: null, theme: {}, allCount: 0 };
   const UP = '<svg viewBox="0 0 24 24"><path d="M12 6l7 7-1.4 1.4L13 9.8V19h-2V9.8l-4.6 4.6L5 13z"/></svg>';
   const DN = '<svg viewBox="0 0 24 24"><path d="M12 18l-7-7 1.4-1.4L11 14.2V5h2v9.2l4.6-4.6L19 11z"/></svg>';
   const RM = '<svg viewBox="0 0 24 24"><path d="M6.4 5L12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg>';
+  const SYNC = '<svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6a6 6 0 016 6c0 1-.25 1.97-.7 2.8l1.46 1.46A8 8 0 0012 4zm0 14a6 6 0 01-6-6c0-1 .25-1.97.7-2.8L5.24 7.74A8 8 0 0012 20v3l4-4-4-4v3z"/></svg>';
+  const SEARCH = '<svg viewBox="0 0 24 24"><path d="M10 3a7 7 0 015.5 11.3l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1110 3zm0 2a5 5 0 100 10 5 5 0 000-10z"/></svg>';
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const img = s => s.image_url || s.poster_url || s.cover_url || '';
-  const thumb = s => img(s) ? `<img loading="lazy" src="${esc(img(s))}" alt="">` : '♪';
+  const thumb = s => img(s) ? `<img loading="lazy" decoding="async" src="${esc(img(s))}" alt="">` : '♪';
   const name = u => [u.first_name, u.last_name].filter(Boolean).join(' ') || (u.username ? '@' + u.username : 'User ' + u.user_id);
   const H = { 'X-Requested-With': 'playlist', 'Content-Type': 'application/json' };
+  const qs = o => Object.entries(o).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  const skRows = n => Array.from({ length: n }, (_, i) => `<div class="skr"><span class="sk" style="width:36px;height:36px"></span><span style="display:grid;gap:6px"><span class="sk" style="height:11px;width:${40 + (i * 17) % 40}%"></span><span class="sk" style="height:9px;width:28%"></span></span></div>`).join('');
+
+  document.addEventListener('load', e => { if (e.target.tagName === 'IMG') e.target.classList.add('ld'); }, true);
+  document.addEventListener('error', e => { if (e.target.tagName === 'IMG') { e.target.classList.add('ld'); e.target.style.display = 'none'; } }, true);
+  const settle = (root = document) => root.querySelectorAll('img:not(.ld)').forEach(i => { if (i.complete) { if (i.naturalWidth) i.classList.add('ld'); else i.style.display = 'none'; } });
 
   // ---- overlay, toast, requests ----
   const ov = $('ov');
-  const showBox = h => { ov.innerHTML = `<div class="box">${h}</div>`; ov.classList.add('show'); };
+  const showBox = (h, cls = '') => { ov.innerHTML = `<div class="box ${cls}">${h}</div>`; ov.classList.add('show'); };
   const hideBox = () => { ov.classList.remove('show'); ov.innerHTML = ''; };
   ov.addEventListener('click', e => { if (e.target === ov) hideBox(); });
   let tt; const toast = m => { const e = $('toast'); e.textContent = m; e.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => e.classList.remove('show'), 2600); };
-  const gate = m => { $('gate').textContent = m; $('gate').hidden = false; $('app').hidden = true; $('selbar').hidden = true; };
+  const gate = m => { $('gate').textContent = m; $('gate').hidden = false; $('app').hidden = true; $('look').hidden = true; $('tabs').hidden = true; $('selbar').hidden = true; };
   async function api(method, p, body) {
     const r = await fetch(p, { method, headers: H, body: body ? JSON.stringify(body) : undefined });
     const d = await r.json().catch(() => ({}));
@@ -153,7 +257,9 @@ h1{font-size:clamp(24px,6vw,36px);font-weight:800;letter-spacing:-.03em;margin:1
     return S.me != null;
   }
 
-  // ---- capsules ----
+  // ======================= capsules =======================
+  const curCap = () => S.caps.find(c => c.id === S.scope);
+  const isGenreCap = () => !!(curCap() && curCap().genre);
   const total = () => S.user ? S.user.song_count || 0 : 0;
   async function loadCaps() {
     const d = await getJson(`/playlist/${S.me}/capsules`); S.user = d.user; S.caps = d.capsules.filter(c => c.id !== 'all');
@@ -162,35 +268,69 @@ h1{font-size:clamp(24px,6vw,36px);font-weight:800;letter-spacing:-.03em;margin:1
   function renderChips() {
     const cur = S.scope;
     $('chips').innerHTML = `<button class="chip${cur === 'all' ? ' on' : ''}" data-s="all">All<small class="num">${S.allCount}</small></button>` +
-      S.caps.map(c => `<button class="chip${cur === c.id ? ' on' : ''}" data-s="${esc(c.id)}">${esc(c.name)}<small class="num">${c.count}</small></button>`).join('') +
+      S.caps.map(c => `<button class="chip${cur === c.id ? ' on' : ''}" data-s="${esc(c.id)}">${c.genre ? SYNC : ''}${esc(c.name)}<small class="num">${c.count}</small></button>`).join('') +
       '<button class="chip add" data-s="+">+ New capsule</button>';
     $('capTools').hidden = cur === 'all';
-    const n = S.user ? name(S.user) : '';
-    $('title').textContent = cur === 'all' ? 'All songs' : (S.caps.find(c => c.id === cur) || {}).name || '';
-    $('meta').textContent = n + (S.user && S.user.username ? ' · @' + S.user.username : '');
+    const c = curCap(), n = S.user ? name(S.user) : '';
+    $('title').textContent = cur === 'all' ? 'All songs' : (c || {}).name || '';
+    $('meta').textContent = c && c.genre ? `Auto capsule · every “${c.genre}” song in your library lands here, new ones included` : n + (S.user && S.user.username ? ' · @' + S.user.username : '');
   }
+
+  // artists / genres of the library (loaded once, refreshed after changes)
+  async function getFacets(force) { if (!S.facets || force) S.facets = await api('GET', '/me/facets'); return S.facets; }
+  // searchable list of artists or genres; onPick(item | null)
+  function facetList(box, kind, { cur = '', note = '', allLabel = 'All', badge = () => '', disabled = () => false, onPick }) {
+    const items = S.facets[kind === 'artist' ? 'artists' : 'genres'];
+    box.innerHTML = `${note ? `<p class="a" style="margin-bottom:8px">${esc(note)}</p>` : ''}<label class="search wide">${SEARCH}<input type="search" placeholder="Search ${kind}s" aria-label="Search ${kind}s"></label><div class="fl2"></div>`;
+    const inp = box.querySelector('input'), list = box.querySelector('.fl2'); let shown = [];
+    const draw = () => {
+      const f = inp.value.trim().toLowerCase(); shown = items.filter(i => !f || i.name.toLowerCase().includes(f)).slice(0, 300);
+      list.innerHTML = (allLabel && !f ? `<button class="it" data-i="-1"><span>${esc(allLabel)}</span></button>` : '') +
+        (shown.map((x, i) => `<button class="it${disabled(x) ? ' off' : ''}" data-i="${i}"${disabled(x) ? ' disabled' : ''}><span class="ell">${esc(x.name)}${x.name === cur ? ' ✓' : ''}</span><small class="num">${badge(x) || x.count}</small></button>`).join('') || (allLabel && !f ? '' : '<div class="state">Nothing found</div>'));
+    };
+    inp.addEventListener('input', draw); draw();
+    list.onclick = e => { const b = e.target.closest('[data-i]'); if (!b || b.disabled) return; const i = +b.dataset.i; onPick(i < 0 ? null : shown[i]); };
+  }
+
   $('chips').addEventListener('click', guard(async e => {
     const b = e.target.closest('[data-s]'); if (!b) return;
-    if (b.dataset.s === '+') {
-      const n = await ask('New capsule', { value: '', ok: 'Create' }); if (!n) return;
-      const c = await api('POST', '/me/capsules', { name: n }); await loadCaps(); return select(c.id);
-    }
+    if (b.dataset.s === '+') return newCapsuleMenu();
     select(b.dataset.s);
   }));
+
+  function newCapsuleMenu() {
+    showBox(`<h3 class="bt">New capsule</h3>
+      <button class="it" data-n="empty"><span>Empty capsule<span class="d">Pick the songs yourself</span></span></button>
+      <button class="it" data-n="genre"><span>Turn a genre into a capsule<span class="d">Fills itself with every song of that genre, and keeps updating</span></span></button>`);
+    ov.querySelector('[data-n=empty]').onclick = guard(async () => {
+      hideBox(); const n = await ask('New capsule', { value: '', ok: 'Create' }); if (!n) return;
+      const c = await api('POST', '/me/capsules', { name: n }); await loadCaps(); select(c.id);
+    });
+    ov.querySelector('[data-n=genre]').onclick = guard(genreMenu);
+  }
+  async function genreMenu(pre) {
+    await getFacets(true);
+    if (!S.facets.genres.length) { toast('No genres found in your songs yet'); return; }
+    showBox('<h3 class="bt">Turn a genre into a capsule</h3><div id="fp"></div>');
+    facetList($('fp'), 'genre', { allLabel: null, note: 'The capsule shows every song with that genre and updates on its own. You can still rename it, delete it, and remove songs from it.',
+      badge: g => g.capsule_id ? 'Already a capsule' : '', disabled: g => !!g.capsule_id,
+      onPick: guard(async g => { hideBox(); const c = await api('POST', '/me/capsules/genre', { genre: g.name }); S.facets = null; await loadCaps(); select(c.id); toast(`“${c.name}” capsule created · ${c.count} songs`); }) });
+  }
   $('bRen').onclick = guard(async () => {
-    const cur = S.caps.find(c => c.id === S.scope); const n = await ask('Rename capsule', { value: cur ? cur.name : '' }); if (!n) return;
+    const cur = curCap(); const n = await ask('Rename capsule', { value: cur ? cur.name : '' }); if (!n) return;
     await api('PATCH', `/me/capsules/${S.scope}`, { name: n }); await loadCaps(); renderChips(); toast('Renamed');
   });
   $('bDel').onclick = guard(async () => {
-    if (!(await ask('Delete this capsule?', { ok: 'Delete', note: 'The songs stay in All.' }))) return;
-    await api('DELETE', `/me/capsules/${S.scope}`); await loadCaps(); select('all'); toast('Capsule deleted');
+    const g = isGenreCap();
+    if (!(await ask('Delete this capsule?', { ok: 'Delete', note: g ? 'Your songs are not touched. You can turn the genre into a capsule again any time.' : 'The songs stay in All.' }))) return;
+    await api('DELETE', `/me/capsules/${S.scope}`); S.facets = null; await loadCaps(); select('all'); toast('Capsule deleted');
   });
 
-  // ---- songs (server-side search + paging) ----
-  const url = p => `/playlist/${S.me}?format=json&page=${p}&q=${encodeURIComponent(S.q)}&capsule=${encodeURIComponent(S.scope)}`;
+  // ======================= songs (server-side search + filter + paging) =======================
+  const url = p => `/playlist/${S.me}?format=json&page=${p}&${qs({ q: S.q, capsule: S.scope, artist: S.artist, genre: S.genre })}`;
   function load(reset) {
     if (reset) { S.ver++; S.ac && S.ac.abort(); S.pending = null; S.failed = false; S.songs = []; S.page = 0; S.pages = 1; S.total = 0;
-      $('rows').innerHTML = '<div class="state">Loading…</div>'; $('more').textContent = ''; }
+      $('rows').innerHTML = skRows(8); $('more').textContent = ''; }
     if (S.pending) return S.pending;
     if (S.page >= S.pages) return Promise.resolve();
     const ver = S.ver; S.ac = new AbortController();
@@ -203,23 +343,61 @@ h1{font-size:clamp(24px,6vw,36px);font-weight:800;letter-spacing:-.03em;margin:1
       if (!S.songs.length) $('rows').innerHTML = `<div class="state">${esc(e.message)}</div>`; else $('more').textContent = 'Could not load more. Tap to retry'; });
     return S.pending;
   }
-  const maybeMore = () => { if (!S.failed && !S.pending && S.page < S.pages && $('more').getBoundingClientRect().top < innerHeight + 500) load(); };
+  const maybeMore = () => { if (S.tab === 'songs' && !S.failed && !S.pending && S.page < S.pages && $('more').getBoundingClientRect().top < innerHeight + 500) load(); };
   new IntersectionObserver(es => es[0].isIntersecting && maybeMore(), { rootMargin: '500px' }).observe($('more'));
   $('more').onclick = () => { if (S.failed) { S.failed = false; load(); } };
-  function select(scope) { S.scope = scope; S.q = ''; $('q').value = ''; S.sel.clear(); renderChips(); renderSel(); load(true); }
-  let qt; $('q').addEventListener('input', e => { clearTimeout(qt); qt = setTimeout(() => { const v = e.target.value.trim(); if (v !== S.q) { S.q = v; S.sel.clear(); renderSel(); load(true); } }, 280); });
+  function select(scope) { S.scope = scope; S.q = ''; S.artist = ''; S.genre = ''; $('q').value = ''; S.sel.clear(); renderChips(); renderFilters(); renderSel(); load(true); }
+  const refilter = () => { S.sel.clear(); renderFilters(); renderSel(); load(true); };
+  let qt; $('q').addEventListener('input', e => { clearTimeout(qt); qt = setTimeout(() => { const v = e.target.value.trim(); if (v !== S.q) { S.q = v; refilter(); } }, 280); });
+
+  function renderFilters() {
+    const f = $('flt'), any = S.artist || S.genre || S.q;
+    f.hidden = !(S.artist || S.genre);
+    f.innerHTML = (S.artist ? `<span class="fc">Artist: ${esc(S.artist)}<button class="ib" data-x="artist" aria-label="Clear artist">${RM}</button></span>` : '') +
+      (S.genre ? `<span class="fc">Genre: ${esc(S.genre)}<button class="ib" data-x="genre" aria-label="Clear genre">${RM}</button></span>` : '') +
+      (S.genre && S.scope === 'all' && !S.artist ? `<button class="pill" id="bGenCap">Turn “${esc(S.genre)}” into a capsule</button>` : '');
+    $('bFilter').textContent = S.artist || S.genre ? 'Filter · ' + ((S.artist ? 1 : 0) + (S.genre ? 1 : 0)) : 'Filter';
+    $('bSelAll').hidden = !any;
+  }
+  $('flt').addEventListener('click', guard(async e => {
+    const x = e.target.closest('[data-x]'); if (x) { S[x.dataset.x] = ''; return refilter(); }
+    if (e.target.closest('#bGenCap')) { const g = S.genre; await getFacets(true); const m = S.facets.genres.find(i => i.name.toLowerCase() === g.toLowerCase());
+      if (m && m.capsule_id) { toast('You already have a capsule for that genre'); return select(m.capsule_id); }
+      const c = await api('POST', '/me/capsules/genre', { genre: g }); S.facets = null; await loadCaps(); select(c.id); toast(`“${c.name}” capsule created · ${c.count} songs`); }
+  }));
+  $('bFilter').onclick = guard(async () => {
+    await getFacets();
+    const menu = () => { showBox(`<h3 class="bt">Filter songs</h3>
+      <button class="it" data-f="artist"><span>Artist</span><small>${esc(S.artist || 'All')}</small></button>
+      <button class="it" data-f="genre"><span>Genre</span><small>${esc(S.genre || 'All')}</small></button>
+      ${S.artist || S.genre ? '<button class="it" data-f="clear"><span>Clear filters</span></button>' : ''}`);
+      ov.querySelectorAll('[data-f]').forEach(b => b.onclick = () => {
+        const k = b.dataset.f; if (k === 'clear') { hideBox(); S.artist = S.genre = ''; return refilter(); }
+        showBox(`<h3 class="bt">${k === 'artist' ? 'Artist' : 'Genre'}</h3><div id="fp"></div>`);
+        facetList($('fp'), k, { cur: S[k], onPick: it => { hideBox(); S[k] = it ? it.name : ''; refilter(); } });
+      }); };
+    menu();
+  });
+  $('bSelAll').onclick = guard(async () => {
+    const { ids } = await api('GET', `/me/songs/ids?${qs({ q: S.q, artist: S.artist, genre: S.genre })}`);
+    // inside a capsule only its own songs are listed, so keep to those
+    let use = ids;
+    if (S.scope !== 'all') { const inCap = new Set((await api('GET', `/me/capsules/${S.scope}/ids`)).ids); use = ids.filter(i => inCap.has(i)); }
+    use.forEach(i => S.sel.add(i)); renderRows(); renderSel(); toast(`Selected ${use.length}`);
+  });
 
   function renderRows() {
-    const can = !S.q;   // custom order only makes sense in the full, unfiltered list
+    const can = !S.q && !S.artist && !S.genre && !isGenreCap();   // custom order only makes sense in the full, unfiltered, hand-ordered list
     $('rows').innerHTML = S.songs.length ? S.songs.map((s, i) => `<div class="r${S.sel.has(s.song_id) ? ' sel' : ''}" data-id="${esc(s.song_id)}">
       <label class="ck"><input type="checkbox" data-ck ${S.sel.has(s.song_id) ? 'checked' : ''} aria-label="Select"></label>
       <span class="th">${thumb(s)}</span>
       <span style="min-width:0"><div class="t ell">${esc(s.title || 'Unknown')}</div><div class="a ell">${esc(s.artist || 'Unknown artist')}</div></span>
       <span class="ac"><button class="ib" data-up aria-label="Move up" ${can && i > 0 ? '' : 'disabled'}>${UP}</button><button class="ib" data-dn aria-label="Move down" ${can && i < S.songs.length - 1 ? '' : 'disabled'}>${DN}</button><button class="ib" data-x aria-label="${S.scope === 'all' ? 'Delete' : 'Remove from capsule'}">${RM}</button></span></div>`).join('')
-      : `<div class="state">${S.q ? 'No songs match “' + esc(S.q) + '”' : S.scope === 'all' ? 'No songs yet' : 'Empty capsule. Select songs in All and add them here.'}</div>`;
+      : `<div class="state">${S.q || S.artist || S.genre ? 'No songs match' + (S.q ? ' “' + esc(S.q) + '”' : '') : S.scope === 'all' ? 'No songs yet' : isGenreCap() ? 'No songs with this genre right now. New ones will appear here on their own.' : 'Empty capsule. Tap “+ Add songs” to fill it.'}</div>`;
+    settle($('rows'));
   }
   function renderSel() {
-    const n = S.sel.size; $('selbar').hidden = !n;
+    const n = S.sel.size; $('selbar').hidden = !n || S.tab !== 'songs';
     $('selN').textContent = n + ' selected'; $('bRm').textContent = S.scope === 'all' ? 'Delete' : 'Remove from capsule';
   }
   const drop = (ids, deleted) => { const set = new Set(ids); S.songs = S.songs.filter(s => !set.has(s.song_id)); ids.forEach(i => S.sel.delete(i)); S.total -= ids.length;
@@ -240,13 +418,13 @@ h1{font-size:clamp(24px,6vw,36px);font-weight:800;letter-spacing:-.03em;margin:1
     if (all && !(await ask(ids.length > 1 ? `Delete ${ids.length} songs?` : 'Delete this song?', { ok: 'Delete', note: 'Removes them from your playlist and every capsule.' }))) return;
     let n = 0;
     try { for (const id of ids) { await api('DELETE', `/me/capsules/${S.scope}/songs/${id}`); n++; drop([id], all); } }
-    finally { renderRows(); renderSel(); await refreshCaps(); if (n) toast(all ? `Deleted ${n}` : `Removed ${n} from capsule`); }
+    finally { renderRows(); renderSel(); S.facets = null; await refreshCaps(); if (n) toast(all ? `Deleted ${n}` : `Removed ${n} from capsule`); }
   }
   $('bRm').onclick = guard(() => removeSongs([...S.sel]));
   $('bClr').onclick = () => { S.sel.clear(); renderRows(); renderSel(); };
   $('bAdd').onclick = () => {
     const cs = S.caps.filter(c => c.id !== S.scope), ids = [...S.sel];
-    showBox(`<h3 class="bt">Add ${ids.length} to capsule</h3>` + cs.map((c, i) => `<button class="it" data-c="${i}">${esc(c.name)}</button>`).join('') + '<button class="it" data-c="new">New capsule…</button>');
+    showBox(`<h3 class="bt">Add ${ids.length} to capsule</h3>` + cs.map((c, i) => `<button class="it" data-c="${i}"><span>${esc(c.name)}</span>${c.genre ? '<small>Auto</small>' : ''}</button>`).join('') + '<button class="it" data-c="new"><span>New capsule…</span></button>');
     ov.querySelectorAll('[data-c]').forEach(b => b.onclick = guard(async () => { hideBox(); let c = cs[b.dataset.c];
       if (b.dataset.c === 'new') { const n = await ask('New capsule', { value: '', ok: 'Create' }); if (!n) return; c = await api('POST', '/me/capsules', { name: n }); }
       let added = 0; for (let k = 0; k < ids.length; k += 200) added += (await api('POST', `/me/capsules/${c.id}/songs`, { song_ids: ids.slice(k, k + 200) })).added;
@@ -254,11 +432,200 @@ h1{font-size:clamp(24px,6vw,36px);font-weight:800;letter-spacing:-.03em;margin:1
       toast(added ? `Added ${added} to ${c.name}` + (added < ids.length ? ` (${ids.length - added} already there)` : '') : 'Already in ' + c.name); }));
   };
 
+  // ======================= song picker (add songs to a capsule) =======================
+  $('bPick').onclick = guard(async () => {
+    const cap = curCap(); if (!cap) return;
+    const [{ ids }] = await Promise.all([api('GET', `/me/capsules/${cap.id}/ids`), getFacets()]);
+    const P = { q: '', artist: '', genre: '', songs: [], page: 0, pages: 1, total: 0, ver: 0, pending: false, sel: new Set(), inCap: new Set(ids) };
+    showBox(`<div class="pk"><h3 class="bt">Add songs to “${esc(cap.name)}”</h3>
+      <div id="pkMain" style="display:flex;flex-direction:column;min-height:0;flex:1">
+        <div class="tools2"><label class="search" style="max-width:none;flex:1">${SEARCH}<input type="search" id="pkq" placeholder="Search songs" aria-label="Search songs"></label>
+          <button class="pill" id="pkA">Artist</button><button class="pill" id="pkG">Genre</button></div>
+        <div class="bar2"><span id="pkInfo" class="num"></span><span class="sp"></span><button class="pill" id="pkAll">Select all matching</button><button class="pill" id="pkNone">Clear</button></div>
+        <div class="pk-list" id="pkList"></div>
+        <div class="btns"><button class="b" id="pkX">Cancel</button><button class="b pri" id="pkGo" disabled>Add</button></div>
+      </div>
+      <div id="pkF" hidden></div></div>`, 'big');
+    const L = $('pkList'), go = $('pkGo');
+    const info = () => {
+      const f = [P.artist && 'artist: ' + P.artist, P.genre && 'genre: ' + P.genre].filter(Boolean).join(' · ');
+      $('pkInfo').textContent = `${P.total} song${P.total === 1 ? '' : 's'}${f ? ' · ' + f : ''}`;
+      $('pkA').textContent = P.artist ? 'Artist ✓' : 'Artist'; $('pkG').textContent = P.genre ? 'Genre ✓' : 'Genre';
+      go.textContent = P.sel.size ? `Add ${P.sel.size}` : 'Add'; go.disabled = !P.sel.size;
+    };
+    const draw = () => {
+      L.innerHTML = P.songs.length ? P.songs.map(s => { const inn = P.inCap.has(s.song_id), on = P.sel.has(s.song_id);
+        return `<div class="r${on ? ' sel' : ''}${inn ? ' in' : ''}" data-id="${esc(s.song_id)}"><label class="ck"><input type="checkbox" ${on || inn ? 'checked' : ''} ${inn ? 'disabled' : ''} aria-label="Select"></label>
+          <span class="th">${thumb(s)}</span><span style="min-width:0"><div class="t ell">${esc(s.title || 'Unknown')}</div><div class="a ell">${esc(s.artist || 'Unknown artist')}</div></span><span class="tag">${inn ? 'In capsule' : ''}</span></div>`; }).join('')
+        : P.pending ? skRows(7) : '<div class="state">No songs match</div>';
+      settle(L); info();
+    };
+    async function pkLoad(reset) {
+      if (reset) { P.ver++; P.songs = []; P.page = 0; P.pages = 1; P.pending = false; P.total = 0; L.scrollTop = 0; P.pending = false; draw(); }
+      if (P.pending || P.page >= P.pages) return;
+      P.pending = true; const ver = P.ver; if (!P.songs.length) draw();
+      try { const d = await getJson(`/playlist/${S.me}?format=json&sort=artist&capsule=all&page=${P.page + 1}&${qs({ q: P.q, artist: P.artist, genre: P.genre })}`);
+        if (ver !== P.ver) return; P.page = d.page; P.pages = d.pages || 1; P.total = d.total; P.songs.push(...d.songs); P.pending = false; draw();
+        if (L.scrollHeight <= L.clientHeight + 40) pkLoad();
+      } catch (e) { if (ver === P.ver) { P.pending = false; L.innerHTML = `<div class="state">${esc(e.message)}</div>`; } }
+    }
+    L.addEventListener('scroll', () => { if (L.scrollTop + L.clientHeight > L.scrollHeight - 300) pkLoad(); });
+    L.addEventListener('click', e => { const r = e.target.closest('.r'); if (!r || r.classList.contains('in')) return; const id = r.dataset.id;
+      if (e.target.closest('.ck') && e.target.tagName !== 'INPUT') return;   // the label forwards the click to its checkbox
+      P.sel.has(id) ? P.sel.delete(id) : P.sel.add(id); draw(); });
+    let pt; $('pkq').addEventListener('input', e => { clearTimeout(pt); pt = setTimeout(() => { const v = e.target.value.trim(); if (v !== P.q) { P.q = v; pkLoad(true); } }, 280); });
+    const facet = k => { $('pkMain').hidden = true; const f = $('pkF'); f.hidden = false;
+      facetList(f, k, { cur: P[k], onPick: it => { P[k] = it ? it.name : ''; f.hidden = true; f.innerHTML = ''; $('pkMain').hidden = false; pkLoad(true); } }); };
+    $('pkA').onclick = () => facet('artist'); $('pkG').onclick = () => facet('genre');
+    $('pkAll').onclick = guard(async () => { const r = await api('GET', `/me/songs/ids?${qs({ q: P.q, artist: P.artist, genre: P.genre })}`);
+      r.ids.filter(i => !P.inCap.has(i)).forEach(i => P.sel.add(i)); draw(); });
+    $('pkNone').onclick = () => { P.sel.clear(); draw(); };
+    $('pkX').onclick = hideBox;
+    go.onclick = guard(async () => {
+      const list = [...P.sel]; go.disabled = true; go.textContent = 'Adding…'; let added = 0;
+      try { for (let k = 0; k < list.length; k += 200) added += (await api('POST', `/me/capsules/${cap.id}/songs`, { song_ids: list.slice(k, k + 200) })).added; }
+      finally { hideBox(); S.facets = null; await refreshCaps(); if (S.scope === cap.id) { S.sel.clear(); renderSel(); load(true); } toast(`Added ${added} to ${cap.name}`); }
+    });
+    pkLoad(true);
+  });
+
+  // ======================= appearance =======================
+  const DEF = { bg: '#000000', accent: '#ffffff', bg2: null, gradAngle: 160, mode: 'auto', font: 'system', radius: 'soft', card: 'solid', player: 'solid',
+    effect: 'none', effectColor: null, effectSpeed: 1, effectDensity: 'med', bgBlur: 0, bgDim: 35, avatarShape: 'round', hero: 'auto', heroCover: 'art',
+    coverShape: 'square', density: 'comfy', artColor: false, heroGlow: true, showPlays: true, showStats: true, bio: '', avatar: '', bgImage: '' };
+  const SECS = {
+    colors: ['bg', 'accent', 'bg2', 'gradAngle', 'mode'],
+    images: ['bgBlur', 'bgDim'],
+    effects: ['effect', 'effectColor', 'effectSpeed', 'effectDensity'],
+    header: ['hero', 'heroCover', 'coverShape', 'avatarShape', 'heroGlow', 'bio'],
+    style: ['font', 'radius', 'card', 'player', 'density', 'artColor', 'showPlays', 'showStats'],
+  };
+  const PRESETS = [
+    ['Default', {}],
+    ['Sakura', { bg: '#1a0f14', bg2: '#3d1527', accent: '#ff8fb1', effect: 'petals', card: 'glass', radius: 'round', font: 'rounded' }],
+    ['Midnight', { bg: '#070b1a', bg2: '#16225a', accent: '#7aa2ff', effect: 'stars', player: 'glass', card: 'glass' }],
+    ['Ocean', { bg: '#04161f', bg2: '#06415a', accent: '#4dd0e1', effect: 'bubbles', card: 'glass', radius: 'round' }],
+    ['Forest', { bg: '#0a140d', bg2: '#194024', accent: '#9be37a', effect: 'fireflies', font: 'serif' }],
+    ['Sunset', { bg: '#1c0b12', bg2: '#5a1f2e', gradAngle: 200, accent: '#ff9a5a', effect: 'leaves', radius: 'round' }],
+    ['Neon', { bg: '#0a0014', bg2: '#240052', accent: '#00ffd0', effect: 'rain', effectColor: '#a855f7', font: 'mono', card: 'outline', radius: 'sharp' }],
+    ['Snow day', { bg: '#eef3fb', bg2: '#d3e2f6', accent: '#3b6fd4', effect: 'snow', card: 'glass', radius: 'round' }],
+    ['Paper', { bg: '#f6f1e7', accent: '#8a4b2a', font: 'serif', card: 'outline', radius: 'sharp' }],
+    ['Love', { bg: '#1a0710', bg2: '#4a0f2a', accent: '#ff4d73', effect: 'hearts', font: 'rounded', radius: 'round' }],
+  ];
+  const cur = () => ({ ...DEF, ...S.theme });
+  const swatch = t => { const T = { ...DEF, ...t }; return T.bg2 ? `linear-gradient(${T.gradAngle}deg,${T.bg},${T.bg2})` : T.bg; };
+  const sec = (id, title, sub, body, reset = true) => `<section class="c2" data-sec="${id}"><div class="sh"><div><h3>${title}</h3>${sub ? `<p>${sub}</p>` : ''}</div>${reset ? `<button class="pill" data-reset="${id}">Reset</button>` : ''}</div>${body}</section>`;
+  const fr = (label, ctl) => `<div class="fr"><span class="fl">${label}</span>${ctl}</div>`;
+  const seg = (k, opts) => `<div class="seg" data-k="${k}">${opts.map(o => { const [v, l] = Array.isArray(o) ? o : [o, o]; return `<button data-v="${v}">${l}</button>`; }).join('')}</div>`;
+  const rng = (k, min, max, step) => `<div class="rg"><input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}"><output data-o="${k}"></output></div>`;
+  const clr = (k, nullable, clearLabel) => `<div class="clr"><span class="hex" data-h="${k}"></span><input type="color" data-k="${k}" aria-label="${k}">${nullable ? `<button class="pill" data-clear="${k}">${clearLabel}</button>` : ''}</div>`;
+  const tgl = k => `<label class="sw"><input type="checkbox" data-k="${k}"><span></span></label>`;
+  const upl = (kind, cls) => `<div class="imgc"><span class="imt ${cls}" id="im_${kind}"></span><button class="pill" data-up="${kind}">Upload</button><button class="pill" data-rm="${kind}">Remove</button></div>`;
+
+  function buildLook() {
+    $('ctl').innerHTML =
+      sec('presets', 'Presets', 'One tap starting points. Your images and bio stay.', `<div class="pre">${PRESETS.map(([n, t], i) => `<button data-preset="${i}" style="background:${swatch(t)};color:${(t.accent || '#fff')}">${n}</button>`).join('')}</div>`, false) +
+      sec('colors', 'Colors', 'Page background, gradient and accent', fr('Background', clr('bg')) + fr('Accent', clr('accent')) + fr('Gradient to', clr('bg2', true, 'None')) + fr('Angle', rng('gradAngle', 0, 360, 5)) + fr('Text', seg('mode', ['auto', 'light', 'dark']))) +
+      sec('images', 'Pictures', 'Stored on Hugging Face like your song art', fr('Profile picture', upl('avatar', '')) + fr('Background image', upl('bg', 'bg')) + fr('Blur', rng('bgBlur', 0, 24, 1)) + fr('Dim', rng('bgDim', 0, 85, 5))) +
+      sec('effects', 'Effects', 'Animated particles floating over your page', fr('Effect', seg('effect', ['none', 'petals', 'snow', 'stars', 'hearts', 'fireflies', 'rain', 'bubbles', 'leaves'])) + fr('Color', clr('effectColor', true, 'Auto')) + fr('Speed', rng('effectSpeed', 0.3, 2.5, 0.1)) + fr('Amount', seg('effectDensity', [['low', 'Few'], ['med', 'Some'], ['high', 'Lots']]))) +
+      sec('header', 'Header', 'The top of your page', fr('Layout', seg('hero', ['auto', 'center', 'left'])) + fr('Big cover shows', seg('heroCover', [['art', 'Song art'], ['avatar', 'Profile pic']])) + fr('Cover shape', seg('coverShape', ['square', 'soft', 'round'])) + fr('Avatar shape', seg('avatarShape', ['round', 'squircle', 'square'])) + fr('Header glow', tgl('heroGlow')) +
+        `<div class="fr"><span class="fl">Bio</span><textarea data-k="bio" maxlength="140" placeholder="A short line under your name (140 chars)"></textarea></div>`) +
+      sec('style', 'Style', 'Fonts, corners and how things look', fr('Font', seg('font', ['system', 'serif', 'mono', 'rounded', 'display', 'condensed'])) + fr('Corners', seg('radius', ['sharp', 'soft', 'round'])) + fr('Cards', seg('card', ['solid', 'glass', 'outline'])) + fr('Player bar', seg('player', ['solid', 'glass'])) + fr('Song list', seg('density', ['comfy', 'compact'])) +
+        fr('Color artwork', tgl('artColor')) + fr('Show play counts', tgl('showPlays')) + fr('Show stat chips', tgl('showStats'))) +
+      '<div class="rall"><button class="pill" id="resetAll">Reset everything to default</button></div>';
+    sync();
+  }
+  const fmtO = (k, v) => k === 'bgBlur' ? v + 'px' : k === 'bgDim' ? v + '%' : k === 'gradAngle' ? v + '°' : '×' + Number(v).toFixed(1);
+  function sync() {
+    const T = cur(), root = $('ctl');
+    root.querySelectorAll('[data-k]').forEach(el => {
+      const k = el.dataset.k, v = T[k];
+      if (el.classList.contains('seg')) el.querySelectorAll('button').forEach(b => b.classList.toggle('on', String(v) === b.dataset.v));
+      else if (el.type === 'checkbox') el.checked = !!v;
+      else if (el.type === 'range') { el.value = v; const o = root.querySelector(`[data-o="${k}"]`); if (o) o.textContent = fmtO(k, v); }
+      else if (el.type === 'color') { const on = k === 'bg' || k === 'accent' || !!S.theme[k]; el.value = v || (k === 'bg2' ? T.bg : '#ffffff'); el.closest('.clr').classList.toggle('off', !on);
+        const h = root.querySelector(`[data-h="${k}"]`); if (h) h.textContent = on ? el.value : 'Off'; }
+      else if (el.tagName === 'TEXTAREA') { if (document.activeElement !== el) el.value = v || ''; }
+    });
+    const bgSet = (id, u) => { const e = $(id); if (e) e.style.backgroundImage = u ? `url("${u.replace(/"/g, '%22')}")` : ''; };
+    bgSet('im_avatar', T.avatar); bgSet('im_bg', T.bgImage);
+    root.querySelector('[data-rm=avatar]').disabled = !T.avatar; root.querySelector('[data-rm=bg]').disabled = !T.bgImage;
+  }
+  // push the theme to the preview iframe (same origin) and save with a debounce
+  let pvReady = false, pvRaf = 0;
+  const pv = () => { cancelAnimationFrame(pvRaf); pvRaf = requestAnimationFrame(() => { const f = $('pv'); if (pvReady && f.contentWindow) f.contentWindow.postMessage({ type: 'theme', theme: S.theme }, location.origin); }); };
+  addEventListener('message', e => { if (e.origin === location.origin && e.data && e.data.type === 'ready') { pvReady = true; pv(); } });
+  $('pv').addEventListener('load', () => { pvReady = true; pv(); });
+  let saveT; const setSt = m => { $('saveSt').textContent = m; };
+  const queueSave = () => { setSt('Saving…'); clearTimeout(saveT); saveT = setTimeout(doSave, 700); };
+  async function doSave() {
+    try { const { avatar, bgImage, ...rest } = S.theme; await api('PUT', '/me/theme', { theme: rest }); setSt('Saved ✓'); setTimeout(() => $('saveSt').textContent === 'Saved ✓' && setSt(''), 2000); }
+    catch (e) { setSt('Not saved'); toast(e.message); }
+  }
+  const changed = () => { sync(); pv(); queueSave(); };
+  const setKey = (k, v) => { if (v === null || v === undefined || v === '') delete S.theme[k]; else S.theme[k] = v; changed(); };
+
+  const L = $('ctl');
+  L.addEventListener('click', guard(async e => {
+    const seg1 = e.target.closest('.seg button'); if (seg1) return setKey(seg1.parentElement.dataset.k, seg1.dataset.v);
+    const cl = e.target.closest('[data-clear]'); if (cl) return setKey(cl.dataset.clear, null);
+    const ps = e.target.closest('[data-preset]'); if (ps) { const t = PRESETS[+ps.dataset.preset][1];
+      [...SECS.colors, ...SECS.effects, 'font', 'radius', 'card', 'player'].forEach(k => delete S.theme[k]); Object.assign(S.theme, t); return changed(); }
+    const rs = e.target.closest('[data-reset]'); if (rs) return resetSec(rs.dataset.reset);
+    const up = e.target.closest('[data-up]'); if (up) { $('file').dataset.kind = up.dataset.up; return $('file').click(); }
+    const rm = e.target.closest('[data-rm]'); if (rm) return removeImg(rm.dataset.rm);
+    if (e.target.id === 'resetAll') { if (!(await ask('Reset your page?', { ok: 'Reset all', note: 'Colors, pictures, effects and styles go back to the default look.' }))) return;
+      const d = await api('DELETE', '/me/theme'); S.theme = d.theme || {}; sync(); pv(); setSt('Saved ✓'); toast('Back to default'); }
+  }));
+  L.addEventListener('input', e => { const el = e.target, k = el.dataset.k; if (!k) return;
+    if (el.type === 'range') setKey(k, Number(el.value)); else if (el.type === 'color') setKey(k, el.value); else if (el.tagName === 'TEXTAREA') { S.theme[k] = el.value.slice(0, 140); if (!S.theme[k].trim()) delete S.theme[k]; pv(); queueSave(); } });
+  L.addEventListener('change', e => { const el = e.target; if (el.type === 'checkbox' && el.dataset.k) setKey(el.dataset.k, el.checked); });
+
+  async function resetSec(id) {
+    if (id === 'images') { await Promise.all(['avatar', 'bg'].filter(k => S.theme[k === 'avatar' ? 'avatar' : 'bgImage']).map(k => removeImg(k, true))); }
+    (SECS[id] || []).forEach(k => delete S.theme[k]); changed(); toast('Reset');
+  }
+  async function removeImg(kind, quiet) {
+    const d = await api('DELETE', `/me/theme/image/${kind}`); const f = kind === 'avatar' ? 'avatar' : 'bgImage';
+    delete S.theme[f]; if (d.theme && d.theme[f]) S.theme[f] = d.theme[f]; sync(); pv(); if (!quiet) toast(kind === 'avatar' ? 'Profile picture removed' : 'Background removed');
+  }
+  // resize in the browser first: smaller uploads, faster page loads for visitors
+  async function shrink(file, kind) {
+    const bmp = await createImageBitmap(file).catch(() => null); if (!bmp) throw new Error('Could not read that image');
+    const c = document.createElement('canvas'), x = c.getContext('2d');
+    if (kind === 'avatar') { const s = Math.min(bmp.width, bmp.height), o = Math.min(512, s); c.width = c.height = o; x.drawImage(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s, 0, 0, o, o); }
+    else { const k = Math.min(1, 1920 / Math.max(bmp.width, bmp.height)); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k); x.drawImage(bmp, 0, 0, c.width, c.height); }
+    const blob = await new Promise(r => c.toBlob(r, kind === 'avatar' ? 'image/webp' : 'image/jpeg', kind === 'avatar' ? .9 : .84));
+    if (!blob) throw new Error('Could not process that image'); if (blob.size > 5.5 * 1048576) throw new Error('Image is too large'); return blob;
+  }
+  $('file').addEventListener('change', guard(async e => {
+    const f = e.target.files[0], kind = e.target.dataset.kind; e.target.value = ''; if (!f || !kind) return;
+    const btn = L.querySelector(`[data-up=${kind}]`); btn.disabled = true; btn.textContent = 'Uploading…';
+    try {
+      const blob = await shrink(f, kind);
+      const r = await fetch(`/me/theme/image/${kind}`, { method: 'POST', headers: { 'X-Requested-With': 'playlist', 'Content-Type': blob.type }, body: blob });
+      const d = await r.json().catch(() => ({})); if (r.status === 401) { gate('Session expired. Reopen this page from Telegram.'); return; } if (!r.ok) throw new Error(d.error || 'Upload failed');
+      const fld = kind === 'avatar' ? 'avatar' : 'bgImage'; S.theme[fld] = d.theme[fld]; sync(); pv(); toast(kind === 'avatar' ? 'Profile picture updated' : 'Background updated');
+    } finally { btn.disabled = false; btn.textContent = 'Upload'; }
+  }));
+
+  async function loadTheme() { try { S.theme = (await getJson(`/playlist/${S.me}/theme`)).theme || {}; } catch { S.theme = {}; } }
+
+  // ======================= tabs =======================
+  function tab(t) {
+    S.tab = t; $('wrap').classList.toggle('wide', t === 'look');
+    document.querySelectorAll('.tabs .t').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+    $('app').hidden = t !== 'songs'; $('look').hidden = t !== 'look'; renderSel();
+    const el = $(t === 'songs' ? 'app' : 'look'); el.classList.remove('fade'); void el.offsetWidth; el.classList.add('fade');
+    if (t === 'look') { if (!$('pv').getAttribute('src')) $('pv').src = `/playlist/${S.me}?preview=1`; sync(); pv(); } else maybeMore();
+  }
+  $('tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) tab(b.dataset.tab); });
+
   (async () => {
     if (!(await signIn())) return gate('Open this page from Telegram: send /manage to the bot in a private chat.');
-    try { await loadCaps(); } catch (e) { return gate(e.message); }
-    $('gate').hidden = true; $('app').hidden = false; $('view').hidden = false; $('view').href = `/playlist/${S.me}`;
-    select('all');
+    try { await Promise.all([loadCaps(), loadTheme()]); } catch (e) { return gate(e.message); }
+    $('gate').hidden = true; $('tabs').hidden = false; $('view').hidden = false; $('view').href = `/playlist/${S.me}`; $('pvOpen').href = `/playlist/${S.me}`;
+    buildLook(); select('all'); tab('songs');
   })();
 })();
 </script>
