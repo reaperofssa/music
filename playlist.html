@@ -199,11 +199,25 @@ html[data-card=outline] :is(.cap,.card){background:transparent;box-shadow:inset 
 html[data-card=outline] :is(.cap,.card):hover{box-shadow:inset 0 0 0 1px var(--accent)}
 
 /* controls follow the card style + corner setting */
-html[data-card=glass] :is(.search,.sort){backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
-html[data-card=outline] :is(.search,.sort,.pill){background-color:transparent;box-shadow:inset 0 0 0 1px var(--line)}
+html[data-card=glass] :is(.search,.sort,.bar .ib,.st){backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+html[data-card=glass] .bar .ib{background:var(--soft)}
+html[data-card=glass] .bar .ib:hover{background:color-mix(in srgb,var(--text) 15%,transparent)}
+html[data-card=outline] :is(.search,.sort,.pill,.st,.bar .ib){background-color:transparent;box-shadow:inset 0 0 0 1px var(--line);transition:box-shadow .15s,color .15s,background .15s}
+html[data-card=outline] :is(.sort,.pill,.bar .ib):hover{background-color:transparent;box-shadow:inset 0 0 0 1px var(--accent)}
+html[data-card=outline] .bar .ib.on{box-shadow:inset 0 0 0 1px var(--accent)}
+html[data-card=outline] .bar .ib.on::after{display:none}
 html[data-card=outline] .search:focus-within{box-shadow:inset 0 0 0 1px var(--accent)}
-html[data-radius=sharp] :is(.search,.sort,.pill,.st){border-radius:0}
-html[data-radius=round] :is(.search,.sort,.pill){border-radius:99px}
+/* the bar itself: a card-style container instead of the plain blurred fade, with the same corners, outline and glass as the cards */
+html[data-card=outline] .bar,html[data-card=glass] .bar{top:8px;padding:8px 10px;margin:0 0 8px}
+html[data-card=outline] .bar::before,html[data-card=glass] .bar::before{inset:0;border-radius:var(--r);-webkit-mask-image:none;mask-image:none}
+html[data-card=outline] .bar::before{background:color-mix(in srgb,var(--bg) 80%,transparent);box-shadow:inset 0 0 0 1px var(--line)}
+html[data-card=glass] .bar::before{background:linear-gradient(var(--soft),var(--soft)),color-mix(in srgb,var(--bg) 45%,transparent);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+/* the main play button is the accent colour normally; in outline it becomes an accent outline, and fills on hover */
+html[data-card=outline] .bigplay{background:transparent;color:var(--accent);box-shadow:inset 0 0 0 1.5px var(--accent)}
+html[data-card=outline] .bigplay:hover{background:var(--accent);color:var(--on-accent)}
+/* corners: bar buttons follow the same setting as the cards */
+html[data-radius=sharp] :is(.search,.sort,.pill,.st,.bar .ib){border-radius:0}
+html[data-radius=round] :is(.search,.sort,.pill,.st,.bar .ib){border-radius:99px}
 .ib:hover,.ib:focus-visible{color:var(--accent)}
 
 /* ===== player bar ===== */
@@ -759,5 +773,4 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
 })();
 </script>
 </body>
-</html>
 </html>
