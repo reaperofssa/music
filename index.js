@@ -18,6 +18,7 @@ const mb = n => n ? (n / 1048576).toFixed(2) + 'MB' : '?';
 const bot = new Telegraf(BOT_TOKEN);
 let users, songs, queues, capsules, capSongs, jobs, mm, hub, hfFiles, hfSettings, nowp, lhours;
 const HOUR = 3600 * 1000;
+const DEFAULT_BOT_USERNAME = 'playIistsbot';   // used for Mini App links until the bot reports its own username
 
 // ---------- poster (Deezer) ----------
 const L = '\\p{L}\\p{M}\\p{N}';
@@ -601,6 +602,10 @@ function startApi({ songs, users, queues }) {
     return docs.map(imgOf).filter(Boolean).slice(0, 4);
   }
 
+  // Mini App deep link base, t.me/<bot>/<app>. The page appends ?startapp=<user id> or ?startapp=<user id>_<capsule id>
+  // (start params allow A-Z a-z 0-9 _ -, and capsule ids are hex, so "_" is a safe separator). null until the bot username is known.
+  const shareBase = () => { const b = bot.botInfo?.username || process.env.BOT_USERNAME || DEFAULT_BOT_USERNAME; return b ? `https://t.me/${b}/${MINIAPP_NAME}` : null; };
+
   // public: [] when the user has no capsules, else [All, ...capsules] with counts and cover art
   app.get('/playlist/:userid/capsules', wrap(async (req, res) => {
     const uid = Number(req.params.userid);
@@ -608,7 +613,7 @@ function startApi({ songs, users, queues }) {
     const u = await users.findOne({ _id: uid });
     if (!u) return res.status(404).json({ error: 'user not found' });
     const caps = await capsules.find({ user_id: uid }).sort({ created_at: 1 }).toArray();
-    if (!caps.length) return res.json({ user: shapeUser(u), count: 0, capsules: [] });
+    if (!caps.length) return res.json({ user: shapeUser(u), count: 0, capsules: [], share: shareBase() });
     const [total, counts] = await Promise.all([
       songs.countDocuments({ user_id: uid }),
       capSongs.aggregate([{ $match: { user_id: uid } }, { $group: { _id: '$capsule_id', n: { $sum: 1 } } }]).toArray(),
@@ -617,7 +622,7 @@ function startApi({ songs, users, queues }) {
     const gCount = new Map(await Promise.all(caps.filter(c => c.genre).map(async c => [c._id, await songs.countDocuments(capFilter(uid, c))])));
     const out = await Promise.all(orderCaps(u, [{ _id: 'all', name: 'All', count: total }, ...caps.map(c => ({ _id: c._id, name: c.name, genre: c.genre || null, include: c.include, excluded: c.excluded, count: c.genre ? gCount.get(c._id) : n.get(c._id) || 0 }))])
       .map(async c => ({ id: c._id, name: c.name, genre: c.genre || null, count: c.count, covers: await coversOf(uid, c) })));
-    res.json({ user: shapeUser(u), count: caps.length, capsules: out });
+    res.json({ user: shapeUser(u), count: caps.length, capsules: out, share: shareBase() });
   }));
 
   // body: { order: [capsule ids, "all" included] } - the first one is shown first on the playlist page
@@ -1445,7 +1450,7 @@ bot.command('profile', async ctx => {
   const who_ = st.u ? dispName(st.u) : t.tg ? dispName(t.tg) : `User ${t.id}`;
   const fav = st.fav ? `${st.fav.title || 'Unknown'}${st.fav.artist ? ' — ' + st.fav.artist : ''} (${nf(st.fav.listens)} ${st.fav.listens === 1 ? 'play' : 'plays'})` : '—';
   const text = [`Name: ${who_}`, `Capsules: ${nf(st.capCount)}`, `Listening Time: ${fmtTime(st.secs)}`, `Total Plays: ${nf(st.plays)}`, `Rank: #${st.rank}`, `Favorite Song: ${fav}`].join('\n');
-  const botUser = ctx.botInfo?.username || process.env.BOT_USERNAME;
+  const botUser = ctx.botInfo?.username || process.env.BOT_USERNAME || DEFAULT_BOT_USERNAME;
   const kb = botUser ? Markup.inlineKeyboard([[Markup.button.url('Playlist', `https://t.me/${botUser}/${MINIAPP_NAME}?startapp=${t.id}`)]]) : {};
   try { await ctx.reply(text, { ...kb, reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } }); }
   catch (e) {
