@@ -575,13 +575,14 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
   // ======================= appearance =======================
   const DEF = { bg: '#000000', accent: '#ffffff', bg2: null, gradAngle: 160, mode: 'auto', font: 'system', radius: 'soft', card: 'solid', player: 'solid',
     effect: 'none', effectColor: null, effectSpeed: 1, effectDensity: 'med', bgBlur: 0, bgDim: 35, avatarShape: 'round', hero: 'auto', heroCover: 'art',
-    coverShape: 'square', density: 'comfy', artColor: false, heroGlow: true, showPlays: true, showStats: true, bio: '', avatar: '', bgImage: '' };
+    coverShape: 'square', density: 'comfy', artColor: false, bg3: null, accent2: null, textColor: null, gradType: 'linear', bgAnim: 'none', bgPattern: 'none', patternOpacity: 12, effectSize: 1, effectOpacity: 100, fxPlayOnly: false, fontScale: 100, glowAmt: 0, titleFx: 'none', rowHover: 'tint', rowStripes: false, coverFx: 'none', enter: 'rise', clickFx: 'none', heroGlow: true, showPlays: true, showStats: true, bio: '', avatar: '', bgImage: '' };
   const SECS = {
-    colors: ['bg', 'accent', 'bg2', 'gradAngle', 'mode'],
+    colors: ['bg', 'accent', 'bg2', 'bg3', 'accent2', 'textColor', 'gradType', 'gradAngle', 'mode'],
     images: ['bgBlur', 'bgDim'],
-    effects: ['effect', 'effectColor', 'effectSpeed', 'effectDensity'],
-    header: ['hero', 'heroCover', 'coverShape', 'avatarShape', 'heroGlow', 'bio'],
-    style: ['font', 'radius', 'card', 'player', 'density', 'artColor', 'showPlays', 'showStats'],
+    bganim: ['bgAnim', 'bgPattern', 'patternOpacity'],
+    effects: ['effect', 'effectColor', 'effectSpeed', 'effectSize', 'effectOpacity', 'effectDensity', 'fxPlayOnly'],
+    header: ['hero', 'heroCover', 'coverShape', 'avatarShape', 'heroGlow', 'titleFx', 'coverFx', 'bio'],
+    style: ['font', 'radius', 'card', 'player', 'density', 'rowHover', 'rowStripes', 'glowAmt', 'fontScale', 'enter', 'clickFx', 'artColor', 'showPlays', 'showStats'],
   };
   const PRESETS = [
     ['Default', {}],
@@ -594,7 +595,24 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
     ['Snow day', { bg: '#eef3fb', bg2: '#d3e2f6', accent: '#3b6fd4', effect: 'snow', card: 'glass', radius: 'round' }],
     ['Paper', { bg: '#f6f1e7', accent: '#8a4b2a', font: 'serif', card: 'outline', radius: 'sharp' }],
     ['Love', { bg: '#1a0710', bg2: '#4a0f2a', accent: '#ff4d73', effect: 'hearts', font: 'rounded', radius: 'round' }],
+    ['Aurora', { bg: '#050b14', bg2: '#0b2a3a', bg3: '#2a0b3a', accent: '#6ef3c5', accent2: '#8a7cff', bgAnim: 'aurora', effect: 'sparkles', card: 'glass', radius: 'round', titleFx: 'gradient', coverFx: 'glow' }],
+    ['Vaporwave', { bg: '#1a0636', bg2: '#ff3d9a', bg3: '#2bd9ff', gradAngle: 200, accent: '#ffe45e', accent2: '#ff3d9a', bgPattern: 'grid', patternOpacity: 14, font: 'tech', card: 'neon', titleFx: 'shine', radius: 'sharp' }],
+    ['Ember', { bg: '#120603', bg2: '#3a1005', accent: '#ff8a3d', effect: 'embers', bgAnim: 'pulse', card: 'lifted', titleFx: 'glow', coverFx: 'shadow' }],
+    ['Party', { bg: '#10081f', bg2: '#2a0f4a', accent: '#ffd166', accent2: '#ff5d73', effect: 'confetti', clickFx: 'sparkle', card: 'gradient', radius: 'round', font: 'rounded', rowHover: 'slide' }],
+    ['Vinyl', { bg: '#0d0d0d', accent: '#e8c37a', effect: 'notes', effectColor: '#e8c37a', coverFx: 'spin', coverShape: 'round', font: 'elegant', card: 'outline', player: 'floating' }],
+    ['Meteor', { bg: '#02030a', bg2: '#0c1236', accent: '#9fb8ff', effect: 'meteors', effectDensity: 'low', bgPattern: 'grain', patternOpacity: 18, player: 'glass', card: 'glass' }],
+    ['Cozy', { bg: '#f3e9dc', bg2: '#e6d2bb', accent: '#b4552d', textColor: '#3b2a20', font: 'handwritten', card: 'lifted', radius: 'pill', bgPattern: 'dots', patternOpacity: 10 }],
+    ['Matcha', { bg: '#101a14', accent: '#b6e08a', font: 'elegant', card: 'outline', enter: 'fade', effect: 'leaves', effectColor: '#8fbf5a' }],
   ];
+  const EFFECTS = ['none', 'petals', 'snow', 'stars', 'hearts', 'fireflies', 'rain', 'bubbles', 'leaves', 'embers', 'confetti', 'sparkles', 'notes', 'meteors'];
+  const FONTS = ['system', 'serif', 'mono', 'rounded', 'display', 'condensed', 'handwritten', 'elegant', 'tech'];
+  const PRESET_KEYS = [...SECS.colors, ...SECS.bganim, ...SECS.effects, 'font', 'radius', 'card', 'player', 'titleFx', 'coverFx', 'rowHover', 'enter', 'clickFx', 'glowAmt'];
+  const hsl = (h, s, l) => { s /= 100; l /= 100; const a = s * Math.min(l, 1 - l), f = n => { const k = (n + h / 30) % 12; return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))).toString(16).padStart(2, '0'); }; return '#' + f(0) + f(8) + f(4); };
+  const pk = a => a[Math.random() * a.length | 0];
+  const rollLook = () => { const h = Math.random() * 360 | 0, dk = Math.random() < .8;
+    return { bg: hsl(h, dk ? 45 : 35, dk ? 7 : 94), bg2: hsl((h + 40) % 360, dk ? 55 : 40, dk ? 18 : 86), accent: hsl((h + 180) % 360, 85, dk ? 68 : 42), accent2: hsl((h + 220) % 360, 85, dk ? 70 : 45),
+      gradAngle: pk([120, 160, 200, 240]), effect: pk(EFFECTS), card: pk(['solid', 'glass', 'outline', 'neon', 'gradient', 'lifted']), font: pk(FONTS), radius: pk(['sharp', 'soft', 'round', 'pill']),
+      bgAnim: pk(['none', 'aurora', 'drift', 'pulse']), titleFx: pk(['none', 'gradient', 'glow', 'shine']), coverFx: pk(['none', 'shadow', 'glow']), mode: 'auto' }; };
   const cur = () => ({ ...DEF, ...S.theme });
   const swatch = t => { const T = { ...DEF, ...t }; return T.bg2 ? `linear-gradient(${T.gradAngle}deg,${T.bg},${T.bg2})` : T.bg; };
   const sec = (id, title, sub, body, reset = true) => `<section class="c2" data-sec="${id}"><div class="sh"><div><h3>${title}</h3>${sub ? `<p>${sub}</p>` : ''}</div>${reset ? `<button class="pill" data-reset="${id}">Reset</button>` : ''}</div>${body}</section>`;
@@ -608,17 +626,19 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
   function buildLook() {
     $('ctl').innerHTML =
       sec('presets', 'Presets', 'One tap starting points. Your images and bio stay.', `<div class="pre">${PRESETS.map(([n, t], i) => `<button data-preset="${i}" style="background:${swatch(t)};color:${(t.accent || '#fff')}">${n}</button>`).join('')}</div>`, false) +
-      sec('colors', 'Colors', 'Page background, gradient and accent', fr('Background', clr('bg')) + fr('Accent', clr('accent')) + fr('Gradient to', clr('bg2', true, 'None')) + fr('Angle', rng('gradAngle', 0, 360, 5)) + fr('Text', seg('mode', ['auto', 'light', 'dark']))) +
+      sec('share', 'Surprise & share', 'Roll a random look, or copy / paste a look code', `<div class="pre"><button data-act="random" style="background:linear-gradient(135deg,#6ef3c5,#8a7cff);color:#000">🎲 Surprise me</button></div><div class="fr"><textarea id="shareCode" placeholder="Paste a look code here…" style="width:100%;min-height:70px"></textarea></div><div class="fr"><button class="pill" data-act="copy">Copy my look</button><button class="pill" data-act="apply">Apply code</button></div>`, false) +
+      sec('colors', 'Colors', 'Page background, gradient and accent', fr('Background', clr('bg')) + fr('Accent', clr('accent')) + fr('Gradient to', clr('bg2', true, 'None')) + fr('Then to', clr('bg3', true, 'None')) + fr('Gradient type', seg('gradType', ['linear', 'radial', 'conic'])) + fr('Angle', rng('gradAngle', 0, 360, 5)) + fr('Accent 2', clr('accent2', true, 'Same')) + fr('Text', seg('mode', ['auto', 'light', 'dark'])) + fr('Text color', clr('textColor', true, 'Auto'))) +
       sec('images', 'Pictures', 'Stored on Hugging Face like your song art', fr('Profile picture', upl('avatar', '')) + fr('Background image', upl('bg', 'bg')) + fr('Blur', rng('bgBlur', 0, 24, 1)) + fr('Dim', rng('bgDim', 0, 85, 5))) +
-      sec('effects', 'Effects', 'Animated particles floating over your page', fr('Effect', seg('effect', ['none', 'petals', 'snow', 'stars', 'hearts', 'fireflies', 'rain', 'bubbles', 'leaves'])) + fr('Color', clr('effectColor', true, 'Auto')) + fr('Speed', rng('effectSpeed', 0.3, 2.5, 0.1)) + fr('Amount', seg('effectDensity', [['low', 'Few'], ['med', 'Some'], ['high', 'Lots']]))) +
-      sec('header', 'Header', 'The top of your page', fr('Layout', seg('hero', ['auto', 'center', 'left'])) + fr('Big cover shows', seg('heroCover', [['art', 'Song art'], ['avatar', 'Profile pic']])) + fr('Cover shape', seg('coverShape', ['square', 'soft', 'round'])) + fr('Avatar shape', seg('avatarShape', ['round', 'squircle', 'square'])) + fr('Header glow', tgl('heroGlow')) +
+      sec('bganim', 'Background motion', 'Living backgrounds and textures', fr('Animation', seg('bgAnim', ['none', 'aurora', 'drift', 'pulse'])) + fr('Pattern', seg('bgPattern', ['none', 'dots', 'grid', 'lines', 'grain'])) + fr('Pattern strength', rng('patternOpacity', 0, 60, 2))) +
+      sec('effects', 'Effects', 'Animated particles floating over your page', fr('Effect', seg('effect', EFFECTS)) + fr('Color', clr('effectColor', true, 'Auto')) + fr('Speed', rng('effectSpeed', 0.3, 2.5, 0.1)) + fr('Size', rng('effectSize', 0.5, 2, 0.1)) + fr('Opacity', rng('effectOpacity', 20, 100, 5)) + fr('Amount', seg('effectDensity', [['low', 'Few'], ['med', 'Some'], ['high', 'Lots']])) + fr('Only while playing', tgl('fxPlayOnly'))) +
+      sec('header', 'Header', 'The top of your page', fr('Layout', seg('hero', ['auto', 'center', 'left'])) + fr('Big cover shows', seg('heroCover', [['art', 'Song art'], ['avatar', 'Profile pic']])) + fr('Cover shape', seg('coverShape', ['square', 'soft', 'round'])) + fr('Avatar shape', seg('avatarShape', ['round', 'squircle', 'square'])) + fr('Header glow', tgl('heroGlow')) + fr('Name style', seg('titleFx', ['none', 'gradient', 'glow', 'shine'])) + fr('Cover effect', seg('coverFx', ['none', 'shadow', 'glow', 'spin'])) +
         `<div class="fr"><span class="fl">Bio</span><textarea data-k="bio" maxlength="140" placeholder="A short line under your name (140 chars)"></textarea></div>`) +
-      sec('style', 'Style', 'Fonts, corners and how things look', fr('Font', seg('font', ['system', 'serif', 'mono', 'rounded', 'display', 'condensed'])) + fr('Corners', seg('radius', ['sharp', 'soft', 'round'])) + fr('Cards', seg('card', ['solid', 'glass', 'outline'])) + fr('Player bar', seg('player', ['solid', 'glass'])) + fr('Song list', seg('density', ['comfy', 'compact'])) +
+      sec('style', 'Style', 'Fonts, corners and how things look', fr('Font', seg('font', FONTS)) + fr('Corners', seg('radius', ['sharp', 'soft', 'round', 'pill'])) + fr('Cards', seg('card', ['solid', 'glass', 'outline', 'neon', 'gradient', 'lifted'])) + fr('Player bar', seg('player', ['solid', 'glass', 'floating', 'accent'])) + fr('Song list', seg('density', ['comfy', 'compact'])) + fr('Row hover', seg('rowHover', ['tint', 'lift', 'glow', 'slide'])) + fr('Striped rows', tgl('rowStripes')) + fr('Button glow', rng('glowAmt', 0, 100, 5)) + fr('Page size', rng('fontScale', 85, 125, 5)) + fr('Entrance', seg('enter', ['rise', 'fade', 'zoom', 'slide', 'none'])) + fr('Tap effect', seg('clickFx', ['none', 'ripple', 'sparkle', 'hearts', 'notes'])) +
         fr('Color artwork', tgl('artColor')) + fr('Show play counts', tgl('showPlays')) + fr('Show stat chips', tgl('showStats'))) +
       '<div class="rall"><button class="pill" id="resetAll">Reset everything to default</button></div>';
     sync();
   }
-  const fmtO = (k, v) => k === 'bgBlur' ? v + 'px' : k === 'bgDim' ? v + '%' : k === 'gradAngle' ? v + '°' : '×' + Number(v).toFixed(1);
+  const fmtO = (k, v) => k === 'bgBlur' ? v + 'px' : ['bgDim', 'patternOpacity', 'effectOpacity', 'fontScale', 'glowAmt'].includes(k) ? v + '%' : k === 'gradAngle' ? v + '°' : '×' + Number(v).toFixed(1);
   function sync() {
     const T = cur(), root = $('ctl');
     root.querySelectorAll('[data-k]').forEach(el => {
@@ -626,7 +646,7 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
       if (el.classList.contains('seg')) el.querySelectorAll('button').forEach(b => b.classList.toggle('on', String(v) === b.dataset.v));
       else if (el.type === 'checkbox') el.checked = !!v;
       else if (el.type === 'range') { el.value = v; const o = root.querySelector(`[data-o="${k}"]`); if (o) o.textContent = fmtO(k, v); }
-      else if (el.type === 'color') { const on = k === 'bg' || k === 'accent' || !!S.theme[k]; el.value = v || (k === 'bg2' ? T.bg : '#ffffff'); el.closest('.clr').classList.toggle('off', !on);
+      else if (el.type === 'color') { const on = k === 'bg' || k === 'accent' || !!S.theme[k]; el.value = v || (k === 'bg2' || k === 'bg3' ? T.bg : k === 'accent2' ? T.accent : '#ffffff'); el.closest('.clr').classList.toggle('off', !on);
         const h = root.querySelector(`[data-h="${k}"]`); if (h) h.textContent = on ? el.value : 'Off'; }
       else if (el.tagName === 'TEXTAREA') { if (document.activeElement !== el) el.value = v || ''; }
     });
@@ -652,8 +672,14 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
   L.addEventListener('click', guard(async e => {
     const seg1 = e.target.closest('.seg button'); if (seg1) return setKey(seg1.parentElement.dataset.k, seg1.dataset.v);
     const cl = e.target.closest('[data-clear]'); if (cl) return setKey(cl.dataset.clear, null);
+    const act = e.target.closest('[data-act]'); if (act) { const a = act.dataset.act;
+      if (a === 'random') { PRESET_KEYS.forEach(k => delete S.theme[k]); Object.assign(S.theme, rollLook()); return changed(); }
+      if (a === 'copy') { const { avatar, bgImage, ...rest } = S.theme, js = JSON.stringify(rest); $('shareCode').value = js; try { await navigator.clipboard.writeText(js); toast('Look code copied'); } catch { toast('Select the code and copy it'); } return; }
+      if (a === 'apply') { let o; try { o = JSON.parse($('shareCode').value); } catch { return toast('That code is not valid'); }
+        if (!o || typeof o !== 'object') return toast('That code is not valid');
+        PRESET_KEYS.forEach(k => delete S.theme[k]); Object.keys(DEF).filter(k => k !== 'avatar' && k !== 'bgImage').forEach(k => { if (k in o) S.theme[k] = o[k]; }); return changed(); } }
     const ps = e.target.closest('[data-preset]'); if (ps) { const t = PRESETS[+ps.dataset.preset][1];
-      [...SECS.colors, ...SECS.effects, 'font', 'radius', 'card', 'player'].forEach(k => delete S.theme[k]); Object.assign(S.theme, t); return changed(); }
+      PRESET_KEYS.forEach(k => delete S.theme[k]); Object.assign(S.theme, t); return changed(); }
     const rs = e.target.closest('[data-reset]'); if (rs) return resetSec(rs.dataset.reset);
     const up = e.target.closest('[data-up]'); if (up) { $('file').dataset.kind = up.dataset.up; return $('file').click(); }
     const rm = e.target.closest('[data-rm]'); if (rm) return removeImg(rm.dataset.rm);
