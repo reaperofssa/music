@@ -256,21 +256,29 @@ const orderCaps = (u, list) => {
 const HEX = /^#[0-9a-f]{6}$/i;
 const THEME_ENUM = {
   mode: ['auto', 'light', 'dark'],
-  font: ['system', 'serif', 'mono', 'rounded', 'display', 'condensed'],
-  radius: ['sharp', 'soft', 'round'],
-  card: ['solid', 'glass', 'outline'],
-  effect: ['none', 'petals', 'snow', 'stars', 'hearts', 'fireflies', 'rain', 'bubbles', 'leaves'],
+  font: ['system', 'serif', 'mono', 'rounded', 'display', 'condensed', 'handwritten', 'elegant', 'tech'],
+  radius: ['sharp', 'soft', 'round', 'pill'],
+  card: ['solid', 'glass', 'outline', 'neon', 'gradient', 'lifted'],
+  effect: ['none', 'petals', 'snow', 'stars', 'hearts', 'fireflies', 'rain', 'bubbles', 'leaves', 'embers', 'confetti', 'sparkles', 'notes', 'meteors'],
   effectDensity: ['low', 'med', 'high'],
   avatarShape: ['round', 'squircle', 'square'],
   hero: ['auto', 'center', 'left'],
   heroCover: ['art', 'avatar'],
   coverShape: ['square', 'soft', 'round'],
   density: ['comfy', 'compact'],
-  player: ['solid', 'glass'],
+  player: ['solid', 'glass', 'floating', 'accent'],
+  gradType: ['linear', 'radial', 'conic'],
+  bgAnim: ['none', 'aurora', 'drift', 'pulse'],
+  bgPattern: ['none', 'dots', 'grid', 'lines', 'grain'],
+  titleFx: ['none', 'gradient', 'glow', 'shine'],
+  rowHover: ['tint', 'lift', 'glow', 'slide'],
+  coverFx: ['none', 'shadow', 'glow', 'spin'],
+  enter: ['rise', 'fade', 'zoom', 'slide', 'none'],
+  clickFx: ['none', 'ripple', 'sparkle', 'hearts', 'notes'],
 };
-const THEME_NUM = { gradAngle: [0, 360], effectSpeed: [0.3, 2.5], bgBlur: [0, 24], bgDim: [0, 85] };
-const THEME_BOOL = ['artColor', 'heroGlow', 'showPlays', 'showStats'];
-const THEME_HEX = ['bg', 'accent', 'bg2', 'effectColor'];
+const THEME_NUM = { gradAngle: [0, 360], effectSpeed: [0.3, 2.5], bgBlur: [0, 24], bgDim: [0, 85], patternOpacity: [0, 60], effectSize: [0.5, 2], effectOpacity: [20, 100], fontScale: [85, 125], glowAmt: [0, 100] };
+const THEME_BOOL = ['artColor', 'heroGlow', 'showPlays', 'showStats', 'rowStripes', 'fxPlayOnly'];
+const THEME_HEX = ['bg', 'accent', 'bg2', 'bg3', 'accent2', 'textColor', 'effectColor'];
 // whitelist everything: the page puts these straight into CSS variables / attributes
 function cleanTheme(i, prev = {}) {
   const o = {};
