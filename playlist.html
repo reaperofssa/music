@@ -217,7 +217,7 @@ html[data-card=outline] .search:focus-within{box-shadow:inset 0 0 0 1px var(--ac
 /* the bar itself: a card-style container instead of the plain blurred fade, with the same corners, outline and glass as the cards */
 html[data-card=outline] .bar,html[data-card=glass] .bar{top:8px;padding:8px 10px;margin:0 0 8px}
 html[data-card=outline] .bar::before,html[data-card=glass] .bar::before{inset:0;border-radius:var(--r);-webkit-mask-image:none;mask-image:none}
-html[data-card=outline] .bar::before{background:color-mix(in srgb,var(--bg) 80%,transparent);box-shadow:inset 0 0 0 1px var(--line)}
+html[data-card=outline] .bar::before{background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:inset 0 0 0 1px var(--line)}
 html[data-card=glass] .bar::before{background:linear-gradient(var(--soft),var(--soft)),color-mix(in srgb,var(--bg) 45%,transparent);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
 /* the main play button is the accent colour normally; in outline it becomes an accent outline, and fills on hover */
 html[data-card=outline] .bigplay{background:transparent;color:var(--accent);box-shadow:inset 0 0 0 1.5px var(--accent)}
@@ -263,6 +263,44 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
 .toast{position:fixed;left:50%;bottom:calc(110px + env(safe-area-inset-bottom));transform:translate(-50%,10px);z-index:70;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:12px;padding:8px 16px;border-radius:99px;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 html[data-radius=sharp] .toast{border-radius:0}
+
+/* ===== now playing (full screen, made to be screenshotted) ===== */
+.np{position:fixed;inset:0;z-index:45;background:var(--bg);overflow:hidden;visibility:hidden;opacity:0;transform:translateY(28px);transition:opacity .28s ease,transform .34s cubic-bezier(.2,.8,.2,1),visibility 0s .34s}
+.np.open{visibility:visible;opacity:1;transform:none;transition-delay:0s}
+.npbg{position:absolute;inset:-90px;background-size:cover;background-position:center;filter:blur(64px) saturate(1.5);opacity:.6;transform:scale(1.15);transition:background-image .6s}
+.npdim{position:absolute;inset:0;background:linear-gradient(rgba(0,0,0,.1),color-mix(in srgb,var(--bg) 55%,transparent) 55%,var(--bg) 100%)}
+.npin{position:relative;z-index:1;height:100%;width:100%;max-width:440px;margin:0 auto;padding:max(12px,env(safe-area-inset-top)) 24px max(20px,env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:14px;min-height:0}
+.nptop{display:flex;align-items:center;justify-content:space-between;gap:8px;transition:opacity .25s}
+.nptop .ib{width:40px;height:40px;font-size:22px;color:var(--text)}
+.npctx{text-align:center;min-width:0;line-height:1.3}
+.npctx small{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut);font-weight:700}
+.npctx b{display:block;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52vw}
+.npart{flex:1 1 auto;min-height:0;display:grid;place-items:center;padding:4px 0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.npcover{width:min(100%,calc(100svh - 430px),400px);min-width:150px;aspect-ratio:1;border-radius:var(--r);background:var(--s3);display:grid;place-items:center;overflow:hidden;position:relative;
+  box-shadow:0 30px 80px rgba(0,0,0,.55),0 0 0 1px var(--soft);transition:transform .55s cubic-bezier(.2,.8,.2,1)}
+.np:not(.playing) .npcover{transform:scale(.88)}
+.npcover img{width:100%;height:100%;object-fit:cover;display:block}
+.npcover .ini{font-size:84px;color:var(--dim-c)}
+html[data-card=outline] .npcover{box-shadow:inset 0 0 0 1px var(--line)}
+.npmeta{text-align:left;min-width:0}
+.npt{font-size:clamp(21px,6vw,27px);font-weight:800;letter-spacing:-.025em;line-height:1.15;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.npa{font-size:16px;color:var(--mut);margin-top:4px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.npal{font-size:12px;color:var(--dim-c);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:16px}
+.npseek input{height:20px}
+.npts{display:flex;justify-content:space-between;font-size:11px;color:var(--mut);margin-top:2px}
+.npctl{display:flex;align-items:center;justify-content:space-between;transition:opacity .25s}
+.npctl .ib{width:46px;height:46px;font-size:23px}
+.npctl .ib.on{color:var(--accent)}
+.npplay{width:68px;height:68px;border-radius:50%;background:var(--accent);color:var(--on-accent);display:grid;place-items:center;font-size:30px;transition:transform .12s}
+.npplay:hover{transform:scale(1.05)}.npplay:active{transform:scale(.96)}
+html[data-card=outline] .npplay{background:transparent;color:var(--accent);box-shadow:inset 0 0 0 1.5px var(--accent)}
+html[data-card=outline] .npplay:hover{background:var(--accent);color:var(--on-accent)}
+html[data-radius=sharp] .npplay{border-radius:0}
+.npfoot{display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:700;color:var(--mut);letter-spacing:.02em}
+.npfoot i{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:7px}
+.np.clean :is(.nptop,.npctl){opacity:0;pointer-events:none}
+@media(prefers-reduced-motion:reduce){.np,.npcover{transition:none}}
+@media(min-width:900px){.npin{max-width:480px}}
 
 /* ===== info drawer ===== */
 .scrim{position:fixed;inset:0;background:rgba(0,0,0,.6);opacity:0;pointer-events:none;transition:opacity .2s;z-index:50}
@@ -331,7 +369,7 @@ html[data-radius=sharp] .toast{border-radius:0}
 </main>
 
 <footer class="player">
-  <button class="now" id="nowBtn" aria-label="Song info">
+  <button class="now" id="nowBtn" aria-label="Open now playing">
     <span class="th" id="npArt">♪</span>
     <span style="min-width:0"><div class="t ell" id="npT">Nothing playing</div><div class="a ell" id="npA">Pick a song</div></span>
   </button>
@@ -352,6 +390,28 @@ html[data-radius=sharp] .toast{border-radius:0}
   </div>
   <audio id="audio" preload="metadata"></audio>
 </footer>
+
+<div class="np" id="np" role="dialog" aria-modal="true" aria-label="Now playing">
+  <div class="npbg" id="npBg"></div><div class="npdim"></div>
+  <div class="npin">
+    <div class="nptop">
+      <button class="ib" id="npClose" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M7.4 9.6L12 14.2l4.6-4.6L18 11l-6 6-6-6z"/></svg></button>
+      <div class="npctx"><small>Playing from</small><b id="npCtx"></b></div>
+      <button class="ib" id="npInfo" aria-label="Song info"><svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1 5h2v2h-2V7zm0 4h2v6h-2v-6z"/></svg></button>
+    </div>
+    <button class="npart" id="npArtBtn" aria-label="Show or hide controls"><span class="npcover" id="npCover"></span></button>
+    <div class="npmeta"><div class="npt" id="npTitle"></div><div class="npa" id="npArtist"></div><div class="npal" id="npAlbum"></div></div>
+    <div class="npseek"><input type="range" id="npSeek" min="0" max="1000" value="0" aria-label="Seek"><div class="npts num"><span id="npCur">0:00</span><span id="npDur">0:00</span></div></div>
+    <div class="npctl">
+      <button class="ib" id="npShuf" aria-label="Shuffle"></button>
+      <button class="ib" id="npPrev" aria-label="Previous"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9.5 12z"/></svg></button>
+      <button class="npplay" id="npPlay" aria-label="Play or pause"></button>
+      <button class="ib" id="npNext" aria-label="Next"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5l10.5 7L4 19z"/></svg></button>
+      <button class="ib" id="npRep" aria-label="Repeat"></button>
+    </div>
+    <div class="npfoot"><span><i></i>@playlists</span><span id="npPlays"></span></div>
+  </div>
+</div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div id="dwrap">
@@ -749,8 +809,58 @@ html[data-radius=sharp] .toast{border-radius:0}
   }
 
   const drawer = open => { if (open && !S.now) return; $('dwrap').classList.toggle('open', open); };
-  $('nowBtn').onclick = () => drawer(true); $('bInfo').onclick = () => drawer(!$('dwrap').classList.contains('open'));
+  $('nowBtn').onclick = () => npOpen(true); $('bInfo').onclick = () => drawer(!$('dwrap').classList.contains('open'));
   $('dClose').onclick = $('scrim').onclick = () => drawer(false);
+
+  const npCtx = () => { const c = S.capsules.find(c => c.id === S.scope); return (c && c.name) || (S.user ? name(S.user) + '’s playlist' : 'Playlist'); };
+  // ===== Now playing: full screen view. It drives the existing player buttons and mirrors their state, so it works with whatever the page's player does =====
+  const np = $('np'), npIs = () => np.classList.contains('open');
+  let npId = null, npDrag = false;
+  function npSync() {
+    const s = S.now; if (!s || !npIs()) return;
+    if (npId !== s.song_id) {
+      npId = s.song_id;
+      $('npCover').innerHTML = img(s) ? `<img src="${esc(img(s))}" alt="">` : '<span class="ini">♪</span>'; settle($('npCover'));
+      $('npBg').style.backgroundImage = img(s) ? `url("${img(s).replace(/"/g, '%22')}")` : 'none';
+      $('npTitle').textContent = s.title || 'Unknown'; $('npArtist').textContent = s.artist || 'Unknown artist';
+      $('npAlbum').textContent = [s.album, s.year || (s.release_date ? String(s.release_date).slice(0, 4) : '')].filter(Boolean).join(' · ');
+      $('npDur').textContent = fmt(s.duration);
+    }
+    $('npCtx').textContent = npCtx();
+    const n = s.listens ?? s.extra; $('npPlays').textContent = n != null ? nf0(n) + (n === 1 ? ' play' : ' plays') : '';
+    $('npPlay').innerHTML = audio.paused ? ICON.play : ICON.pause; np.classList.toggle('playing', !audio.paused);
+    $('npShuf').innerHTML = ICON.shuf; $('npShuf').classList.toggle('on', $('pShuffle').classList.contains('on'));
+    $('npRep').innerHTML = $('bRepeat').innerHTML; $('npRep').classList.toggle('on', $('bRepeat').classList.contains('on'));
+  }
+  const nf0 = n => Number(n || 0).toLocaleString();
+  function npTick() {
+    if (!npIs()) return;
+    if (audio.duration && isFinite(audio.duration)) { $('npDur').textContent = fmt(audio.duration); if (!npDrag) { $('npSeek').value = audio.currentTime / audio.duration * 1000; fill($('npSeek')); } }
+    if (!npDrag) $('npCur').textContent = fmt(audio.currentTime);
+  }
+  function npOpen(open) {
+    if (open && !S.now) return;
+    np.classList.toggle('open', open); document.documentElement.style.overflow = open ? 'hidden' : '';
+    if (open) { npId = null; npSync(); npTick(); } else np.classList.remove('clean');
+  }
+  ['play', 'pause'].forEach(ev => audio.addEventListener(ev, npSync));
+  ['timeupdate', 'loadedmetadata', 'durationchange'].forEach(ev => audio.addEventListener(ev, npTick));
+  // the page's own player updates these elements when the song / shuffle / repeat state changes
+  const npWatch = new MutationObserver(npSync);
+  [['npT', { childList: true, subtree: true }], ['npArt', { childList: true, subtree: true }], ['bPlay', { childList: true }], ['pShuffle', { attributes: true, attributeFilter: ['class'] }], ['bRepeat', { attributes: true, childList: true, attributeFilter: ['class'] }]]
+    .forEach(([id, o]) => npWatch.observe($(id), o));
+  $('npPlay').onclick = () => $('bPlay').click(); $('npPrev').onclick = () => $('bPrev').click(); $('npNext').onclick = () => $('bNext').click();
+  $('npShuf').onclick = () => $('pShuffle').click(); $('npRep').onclick = () => $('bRepeat').click();
+  $('npInfo').onclick = () => $('bInfo').click();
+  $('npClose').onclick = () => npOpen(false);
+  $('npArtBtn').onclick = () => np.classList.toggle('clean');   // hides the buttons so the screenshot is just the song
+  $('npSeek').addEventListener('input', () => { npDrag = true; fill($('npSeek')); $('npCur').textContent = fmt($('npSeek').value / 1000 * (audio.duration || 0)); });
+  $('npSeek').addEventListener('change', () => { if (audio.duration) audio.currentTime = $('npSeek').value / 1000 * audio.duration; npDrag = false; });
+  fill($('npSeek'));
+  addEventListener('keydown', e => { if (e.key === 'Escape' && npIs() && !$('dwrap').classList.contains('open')) npOpen(false); }, true);   // capture: runs before the drawer's own Escape handling
+  let npY = null;   // swipe down to close
+  np.addEventListener('touchstart', e => { npY = e.target.closest('input') ? null : e.touches[0].clientY; }, { passive: true });
+  np.addEventListener('touchend', e => { if (npY !== null && e.changedTouches[0].clientY - npY > 90) npOpen(false); npY = null; }, { passive: true });
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') drawer(false);
