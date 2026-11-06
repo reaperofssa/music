@@ -151,6 +151,13 @@ html[data-hero=left] h1{font-size:clamp(26px,7vw,60px)}
 .shelf{margin:4px 0 14px}
 .shelf h2,.lh{font-size:12px;font-weight:700;color:var(--mut)}
 .shelf h2{margin-bottom:8px}
+.shelf:not(.open) h2{margin-bottom:0}
+.shelft{display:inline-flex;align-items:center;gap:4px;font:inherit;color:inherit;padding:4px 6px 4px 0}
+.shelft:hover{color:var(--text)}
+.shelft svg{font-size:16px;transition:transform .2s}
+.shelf.open .shelft svg{transform:rotate(180deg)}
+.shelf:not(.open) .cards{display:none}
+.shelf.open .cards{animation:fi .3s ease both}
 .cards{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;scrollbar-width:none;scroll-snap-type:x proximity}
 .cards::-webkit-scrollbar{display:none}
 .card{flex:none;width:104px;text-align:left;scroll-snap-align:start;padding:7px;border-radius:var(--r);background:var(--s1);transition:background .15s}
@@ -253,6 +260,10 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
   .side input{width:92px}
 }
 
+.toast{position:fixed;left:50%;bottom:calc(110px + env(safe-area-inset-bottom));transform:translate(-50%,10px);z-index:70;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:12px;padding:8px 16px;border-radius:99px;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+html[data-radius=sharp] .toast{border-radius:0}
+
 /* ===== info drawer ===== */
 .scrim{position:fixed;inset:0;background:rgba(0,0,0,.6);opacity:0;pointer-events:none;transition:opacity .2s;z-index:50}
 .drawer{position:fixed;z-index:60;background:var(--s1);border:1px solid var(--line);overflow:auto;transition:transform .25s ease;
@@ -301,6 +312,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
   <div class="bar">
     <button class="bigplay" id="bAll" aria-label="Play all"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
     <button class="ib" id="bShuffle" aria-label="Shuffle"></button>
+    <button class="ib" id="bShare" aria-label="Copy link to this capsule" title="Copy link"><svg viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 010-1.4l3-3a1 1 0 011.4 1.4l-3 3a1 1 0 01-1.4 0zM8.5 17.5a3.5 3.5 0 010-5l2-2 1.4 1.4-2 2a1.5 1.5 0 002.1 2.1l2-2 1.4 1.4-2 2a3.5 3.5 0 01-4.9.1zm7-6.9l2-2a1.5 1.5 0 00-2.1-2.1l-2 2-1.4-1.4 2-2a3.5 3.5 0 015 5l-2 2z"/></svg></button>
     <span class="sp"></span>
     <label class="search"><svg viewBox="0 0 24 24"><path d="M10 3a7 7 0 015.5 11.3l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1110 3zm0 2a5 5 0 100 10 5 5 0 000-10z"/></svg><input type="search" id="q" placeholder="Search" aria-label="Search songs"></label>
     <select class="sort" id="sort" aria-label="Sort">
@@ -308,7 +320,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     </select>
   </div>
 
-  <section class="shelf" id="shelf" hidden><h2>Most played</h2><div class="cards" id="cards"></div></section>
+  <section class="shelf" id="shelf" hidden><h2><button class="shelft" id="shelfT" aria-expanded="false" aria-controls="cards">Most played<svg viewBox="0 0 24 24"><path d="M7.4 9.6L12 14.2l4.6-4.6L18 11l-6 6-6-6z"/></svg></button></h2><div class="cards" id="cards"></div></section>
 
   <section>
     <div class="lh"><span class="r">#</span><span>Title</span><span class="hide-s">Album</span><span class="hide-s r plays">Plays</span><span class="r">Time</span></div>
@@ -341,6 +353,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
   <audio id="audio" preload="metadata"></audio>
 </footer>
 
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div id="dwrap">
   <div class="scrim" id="scrim"></div>
   <aside class="drawer" id="drawer" aria-label="Song info">
@@ -353,9 +366,12 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
 (() => {
   const $ = id => document.getElementById(id), audio = $('audio');
   const launch = (() => { const q = new URLSearchParams(location.search), h = location.hash.slice(1); return q.get('tgWebAppStartParam') || (h.includes('=') ? new URLSearchParams(h).get('tgWebAppStartParam') : null) || (window.Telegram && Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.start_param) || null; })();
+  // start param: "<user id>" (whole playlist) or "<user id>_<capsule id>" (opens that capsule directly)
+  const LP = launch && /^(\d+)(?:_([A-Za-z0-9]+))?$/.exec(launch), launchUid = LP ? LP[1] : launch;
+  let launchCap = LP ? LP[2] || null : null;   // used once, so the back button still goes to the grid
   const uid = (() => {
     const seg = location.pathname.replace(/\/+$/, '').split('/').pop();
-    try { if (launch) sessionStorage.setItem('pl_uid', launch); return /^\d+$/.test(seg) ? seg : launch || sessionStorage.getItem('pl_uid') || seg; } catch { return /^\d+$/.test(seg) ? seg : launch || seg; }
+    try { if (launchUid) sessionStorage.setItem('pl_uid', launchUid); return /^\d+$/.test(seg) ? seg : launchUid || sessionStorage.getItem('pl_uid') || seg; } catch { return /^\d+$/.test(seg) ? seg : launchUid || seg; }
   })();
   const hashId = () => { const h = location.hash.slice(1); return h.includes('=') ? '' : decodeURIComponent(h); };   // Telegram's own launch params (#tgWebApp...=) are not capsule ids
   const PREVIEW = new URLSearchParams(location.search).has('preview') && window.parent !== window;   // embedded live preview inside /manage
@@ -598,6 +614,10 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     if (isCur(s)) return toggle(); buildQueue(s, list()); play(s); };
   $('rows').addEventListener('click', e => pick(e, () => S.songs));
   $('cards').addEventListener('click', e => pick(e, () => S.top));
+  // "Most played" starts collapsed; once someone opens it, that choice is remembered on this device
+  const setShelf = open => { $('shelf').classList.toggle('open', open); $('shelfT').setAttribute('aria-expanded', open); };
+  setShelf(ls.get('pl_shelf_open') === '1');
+  $('shelfT').onclick = () => { const open = !$('shelf').classList.contains('open'); setShelf(open); ls.set('pl_shelf_open', open ? '1' : '0'); };
 
   let t; $('q').addEventListener('input', e => { clearTimeout(t); t = setTimeout(() => { const v = e.target.value.trim(); if (v !== S.q) { S.q = v; load(true); renderShelf(); } }, 280); });
   $('sort').addEventListener('change', e => { S.sort = e.target.value; load(true); });
@@ -742,7 +762,7 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     return `<a class="cap rise" style="--i:${Math.min(i, 12)}" href="#${esc(c.id)}"><span class="cv${v.length === 4 ? ' m4' : ''}">${v.length ? v.map(a => `<img loading="lazy" decoding="async" src="${esc(a)}" alt="">`).join('') : '♪'}</span><span class="t ell">${esc(c.name)}</span><span class="a">${c.count} songs${c.genre ? ' · Auto' : ''}</span></a>`; }).join('');
     settle($('capGrid')); };
   async function reloadCaps() {
-    try { const d = await getJson(`/playlist/${encodeURIComponent(uid)}/capsules`); S.capsules = d.capsules; if (d.user) S.user = d.user; ls.set('pl_caps_' + uid, d.capsules.length ? '1' : '0'); } catch {}
+    try { const d = await getJson(`/playlist/${encodeURIComponent(uid)}/capsules`); S.capsules = d.capsules; S.share = d.share || null; if (d.user) S.user = d.user; ls.set('pl_caps_' + uid, d.capsules.length ? '1' : '0'); } catch {}
   }
   function show(scope) {
     S.scope = scope; S.q = ''; S.sort = 'def'; S.top = []; S.stats = null; S.arts = null; S.shown = 0; $('q').value = ''; $('sort').value = 'def';
@@ -754,9 +774,30 @@ input[type=range]:hover::-moz-range-thumb{width:12px;height:12px}
     if (S.capsules.length && !S.capsules.some(c => c.id === scope)) { location.hash = ''; return; }
     renderUser(); load(true); loadTop();
   }
-  const route = () => { const h = S.capsules.length ? hashId() : ''; show(h || (S.capsules.length ? null : 'all')); };
+  const route = () => {
+    let h = S.capsules.length ? hashId() : '';
+    if (!h && launchCap) { if (S.capsules.some(c => c.id === launchCap)) { h = launchCap; history.replaceState(null, '', '#' + launchCap); } launchCap = null; }   // only capsules that belong to this user
+    show(h || (S.capsules.length ? null : 'all'));
+  };
   window.addEventListener('hashchange', route);
   $('bBack').onclick = () => { location.hash = ''; };
+
+  // copy a link that opens this capsule directly: the Mini App deep link when the bot is known (t.me/<bot>/<app>?startapp=<user>_<capsule>), else the plain web URL
+  let toastT = 0;
+  const toast = msg => { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 1800); };
+  const shareLink = scope => S.share
+    ? `${S.share}?startapp=${encodeURIComponent(uid)}${scope ? '_' + encodeURIComponent(scope) : ''}`
+    : `${location.origin}/playlist/${encodeURIComponent(uid)}${scope ? '#' + encodeURIComponent(scope) : ''}`;
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {}
+    try { const a = document.createElement('textarea'); a.value = text; a.style.cssText = 'position:fixed;opacity:0'; document.body.appendChild(a); a.select(); const ok_ = document.execCommand('copy'); a.remove(); return ok_; } catch { return false; }
+  }
+  $('bShare').hidden = PREVIEW;
+  $('bShare').onclick = async () => {
+    const url = shareLink(S.scope);
+    if (await copyText(url)) { toast('Link copied'); const b = $('bShare'); b.classList.add('on'); setTimeout(() => b.classList.remove('on'), 1200); }
+    else prompt('Copy this link', url);
+  };
 
   // the HttpOnly session cookie (set by the manage page) is only sent to /me, so this is how the page learns the viewer owns it
   const ownerLink = () => PREVIEW ? 0 : fetch('/me').then(r => r.ok ? r.json() : null).then(d => { if (d && String(d.user_id) === String(uid)) $('bManage').hidden = false; }).catch(() => {});
