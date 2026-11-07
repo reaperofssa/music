@@ -177,6 +177,13 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
 .ro .nm{font-weight:600;font-size:14px}
 .ro small{color:var(--mut);font-size:12px}
 .rolist{margin:8px -4px 4px;max-height:56svh;overflow:auto}
+.pbar{height:6px;border-radius:3px;background:var(--s3);overflow:hidden;margin:10px 0 8px}
+.pbar i{display:block;height:100%;width:0;background:#fff;transition:width .4s}
+.imp{margin:6px -4px 0;max-height:46svh;overflow:auto}
+.imr{display:flex;align-items:center;gap:10px;padding:6px 4px}
+.ims{width:22px;flex:none;text-align:center;font-size:13px;color:var(--dim)}
+.ims.done{color:#fff}.ims.failed{color:#ff6b6b}.ims.processing{color:#fff;animation:pu 1s ease-in-out infinite}
+@keyframes pu{50%{opacity:.3}}
 </style>
 </head>
 <body>
@@ -247,7 +254,7 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
     const r = await fetch(p, { method, headers: H, body: body ? JSON.stringify(body) : undefined });
     const d = await r.json().catch(() => ({}));
     if (r.status === 401) { gate('Session expired. Reopen this page from Telegram.'); throw new Error('Session expired'); }
-    if (!r.ok) throw new Error(d.error || 'Request failed');
+    if (!r.ok) throw Object.assign(new Error(d.error || 'Request failed'), { data: d });
     return d;
   }
   const getJson = async (u, signal) => { const r = await fetch(u, { headers: { Accept: 'application/json' }, signal }); if (!r.ok) throw new Error(r.status === 404 ? 'Not found' : 'Failed to load (' + r.status + ')'); return r.json(); };
@@ -372,12 +379,14 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
   function newCapsuleMenu() {
     showBox(`<h3 class="bt">New capsule</h3>
       <button class="it" data-n="empty"><span>Empty capsule<span class="d">Pick the songs yourself</span></span></button>
-      <button class="it" data-n="genre"><span>Turn a genre into a capsule<span class="d">Fills itself with every song of that genre, and keeps updating</span></span></button>`);
+      <button class="it" data-n="genre"><span>Turn a genre into a capsule<span class="d">Fills itself with every song of that genre, and keeps updating</span></span></button>
+      <button class="it" data-n="spotify"><span>Import from Spotify<span class="d">Paste a playlist link, the first 50 songs are added for you</span></span></button>`);
     ov.querySelector('[data-n=empty]').onclick = guard(async () => {
       hideBox(); const n = await ask('New capsule', { value: '', ok: 'Create' }); if (!n) return;
       const c = await api('POST', '/me/capsules', { name: n }); await loadCaps(); select(c.id);
     });
     ov.querySelector('[data-n=genre]').onclick = guard(genreMenu);
+    ov.querySelector('[data-n=spotify]').onclick = importMenu;
   }
   async function genreMenu(pre) {
     await getFacets(true);
@@ -720,6 +729,84 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
 
   async function loadTheme() { try { S.theme = (await getJson(`/playlist/${S.me}/theme`)).theme || {}; } catch { S.theme = {}; } }
 
+  // ======================= import from Spotify =======================
+  // The server owns the job (POST /me/imports/spotify), this page only polls it, so closing the dialog or reloading loses nothing:
+  // the job id lives in the page URL (?import=<id>) and, failing that, any running import is picked up from GET /me/imports on load.
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  let impTok = 0;
+  const impUrl = id => { try { const u = new URL(location.href); id ? u.searchParams.set('import', id) : u.searchParams.delete('import'); history.replaceState(null, '', u); } catch {} };
+  const IMS = { pending: '·', processing: '↓', done: '✓', failed: '✕', cancelled: '–' };
+
+  function importMenu() {
+    showBox(`<h3 class="bt">Import from Spotify</h3><p class="a">Paste a public playlist link. The first 50 songs go into a new capsule.</p>
+      <input id="spu" maxlength="300" inputmode="url" placeholder="https://open.spotify.com/playlist/…" autocomplete="off">
+      <div class="btns"><button class="b" id="spc">Cancel</button><button class="b pri" id="spo">Import</button></div>`);
+    const i = $('spu'); i.focus(); i.addEventListener('keydown', e => e.key === 'Enter' && $('spo').click());
+    $('spc').onclick = hideBox;
+    $('spo').onclick = guard(async () => {
+      const url = i.value.trim(); if (!url) return;
+      const b = $('spo'); b.disabled = true; b.textContent = 'Reading playlist…';
+      try { const d = await api('POST', '/me/imports/spotify', { url }); S.facets = null; await loadCaps(); renderChips(); trackImport(d.id); }
+      catch (e) { if (e.data && e.data.import_id) return trackImport(e.data.import_id); b.disabled = false; b.textContent = 'Import'; throw e; }
+    });
+  }
+
+  function openImportBox() {
+    showBox(`<div id="imB"><h3 class="bt" id="imH">Starting…</h3><p class="a" id="imS"></p><div class="pbar"><i id="imP"></i></div><div class="imp" id="imL"></div><div class="btns" id="imBt"></div></div>`);
+  }
+  let impRows = '', impBtn = '';
+  function paintImport(d) {
+    if (!$('imB')) return;   // dialog is closed or replaced: the poll keeps going, only the painting stops
+    const c = d.counts || {}, fin = (c.done || 0) + (c.failed || 0) + (c.cancelled || 0), run = d.status === 'running';
+    $('imH').textContent = run ? `Importing ${fin} of ${d.total}` : d.status === 'done' ? `Done · ${c.done} songs added` : d.status === 'partial' ? `${c.done} added · ${c.failed} failed` : d.status === 'cancelled' ? 'Cancelled · the capsule was deleted' : 'Import failed';
+    $('imS').textContent = `“${d.capsule_name}”${d.playlist_total > d.total ? ` · first ${d.total} of ${d.playlist_total} songs` : ''}`;
+    $('imP').style.width = (d.total ? Math.round(fin / d.total * 100) : 0) + '%';
+    const rows = d.items.map(x => {
+      const retrying = x.status === 'pending' && x.attempts > 0, sub = x.status === 'failed' ? x.error || 'Failed' : retrying ? `Retrying (attempt ${x.attempts + 1})…` : x.artist || '';
+      return `<div class="imr"><span class="th">${x.image ? `<img loading="lazy" decoding="async" src="${esc(x.image)}" alt="">` : '♪'}</span><span style="min-width:0;flex:1"><div class="t ell">${esc(x.title || 'Unknown')}</div><div class="a ell">${esc(sub)}</div></span><span class="ims ${x.status}">${IMS[x.status] || ''}</span></div>`;
+    }).join('');
+    if (rows !== impRows) { const L = $('imL'), t = L.scrollTop; L.innerHTML = rows; L.scrollTop = t; impRows = rows; settle(L); }   // only touch the list when it changed (no image flicker)
+    const btn = d.status + (c.failed ? 'f' : '');
+    if (btn !== impBtn) {   // same for the buttons, so a tap is never swallowed by a refresh
+      impBtn = btn;
+      $('imBt').innerHTML = (c.failed && !run ? '<button class="b" id="imR">Retry failed</button>' : '') + (run ? '<button class="b pri" id="imX">Hide</button>' : '<button class="b pri" id="imO">' + (d.status === 'cancelled' || d.status === 'failed' && !c.done ? 'Close' : 'Open capsule') + '</button>');
+      if ($('imX')) $('imX').onclick = hideBox;
+      if ($('imO')) $('imO').onclick = guard(async () => { impUrl(null); hideBox(); if (d.status === 'cancelled' || !c.done) return; await loadCaps(); select(d.capsule_id); });
+      if ($('imR')) $('imR').onclick = guard(async () => { $('imR').disabled = true; await api('POST', `/me/imports/${d.id}/retry`); trackImport(d.id); });
+    }
+  }
+
+  async function trackImport(id) {
+    const tok = ++impTok; impUrl(id); impRows = impBtn = ''; openImportBox();
+    for (let errs = 0; ; ) {
+      let d;
+      try { d = await api('GET', `/me/imports/${encodeURIComponent(id)}`); errs = 0; }
+      catch (e) {
+        if (tok !== impTok || /expired/i.test(e.message)) return;
+        if (/not found/i.test(e.message)) { impUrl(null); if ($('imB')) hideBox(); return toast('That import is no longer available'); }
+        if ($('imB') && ++errs > 2) $('imS').textContent = 'Connection lost, retrying…';   // the server keeps working; we just keep asking
+        await wait(3000); continue;
+      }
+      if (tok !== impTok) return;
+      paintImport(d);
+      if (d.status !== 'running') {
+        S.facets = null; try { await loadCaps(); renderChips(); } catch {}
+        if (!$('imB')) { impUrl(null); toast(`Spotify import finished · ${d.counts.done || 0} added${d.counts.failed ? `, ${d.counts.failed} failed` : ''}`); }
+        return;
+      }
+      await wait(1500);
+    }
+  }
+
+  async function resumeImport() {
+    try {
+      const id = new URLSearchParams(location.search).get('import');
+      if (id) return trackImport(id);
+      const run = (await api('GET', '/me/imports')).imports.find(i => i.status === 'running');
+      if (run) trackImport(run.id);
+    } catch {}
+  }
+
   // ======================= tabs =======================
   function tab(t) {
     S.tab = t; $('wrap').classList.toggle('wide', t === 'look');
@@ -734,7 +821,7 @@ img{opacity:0;transition:opacity .4s}img.ld{opacity:1}
     if (!(await signIn())) return gate('Open this page from Telegram: send /manage to the bot in a private chat.');
     try { await Promise.all([loadCaps(), loadTheme()]); } catch (e) { return gate(e.message); }
     $('gate').hidden = true; $('tabs').hidden = false; $('view').hidden = false; $('view').href = `/playlist/${S.me}`;
-    buildLook(); select('all'); tab('songs');
+    buildLook(); select('all'); tab('songs'); resumeImport();
   })();
 })();
 </script>
