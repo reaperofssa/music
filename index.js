@@ -16,7 +16,7 @@ const log = (...a) => console.log(`[${new Date().toISOString()}] [audio]`, ...a)
 const who = u => u ? `${u.id}${u.username ? ' @' + u.username : ''}` : '?';
 const mb = n => n ? (n / 1048576).toFixed(2) + 'MB' : '?';
 const bot = new Telegraf(BOT_TOKEN);
-let users, songs, queues, capsules, capSongs, jobs, mm, hub, hfFiles, hfSettings, nowp, lhours;
+let users, songs, queues, capsules, capSongs, jobs, imports, importItems, mm, hub, hfFiles, hfSettings, nowp, lhours;
 const HOUR = 3600 * 1000;
 const DEFAULT_BOT_USERNAME = 'playIistsbot';   // used for Mini App links until the bot reports its own username
 
@@ -650,6 +650,68 @@ function startApi({ songs, users, queues }) {
     const c = { _id: crypto.randomBytes(5).toString('hex'), user_id: req.uid, name, name_key: name.toLowerCase(), created_at: new Date() };
     try { await capsules.insertOne(c); } catch (e) { if (dupKey(e)) return res.status(409).json({ error: 'you already have a capsule with that name' }); throw e; }
     res.status(201).json({ id: c._id, name: c.name, count: 0 });
+  }));
+
+  // ===== import from Spotify: playlist link -> new capsule + durable per-track items (see "Spotify import" below). The page polls GET /me/imports/:id =====
+  app.post('/me/imports/spotify', auth, wrap(async (req, res) => {
+    const pid = spPlaylistId(req.body?.url);
+    if (!pid) return res.status(400).json({ error: 'Paste a Spotify playlist link (open.spotify.com/playlist/…)' });
+    const running = await imports.findOne({ user_id: req.uid, status: 'running' }, { projection: { _id: 1 } });
+    if (running) return res.status(409).json({ error: 'You already have an import running', import_id: running._id });
+    if (await capsules.countDocuments({ user_id: req.uid }) >= MAX_CAPSULES) return res.status(400).json({ error: `max ${MAX_CAPSULES} capsules` });
+    let pl;
+    try { pl = await spFetchPlaylist(pid); }
+    catch (e) { log(`spotify playlist ${pid} failed: ${e.message}`); return res.status(502).json({ error: 'Could not read that playlist. Make sure it is public, then try again.' }); }
+
+    const base = cleanName(req.body?.name) || cleanName(pl.name) || 'Spotify import';
+    let cap = null;
+    for (let n = 1; n <= 20 && !cap; n++) {   // same name already taken -> "Name (2)", "Name (3)"…
+      const nm = n === 1 ? base : `${base.slice(0, 40 - String(n).length - 3)} (${n})`;
+      const c = { _id: crypto.randomBytes(5).toString('hex'), user_id: req.uid, name: nm, name_key: nm.toLowerCase(), created_at: new Date() };
+      try { await capsules.insertOne(c); cap = c; } catch (e) { if (!dupKey(e)) throw e; }
+    }
+    if (!cap) return res.status(409).json({ error: 'you already have capsules with that name. Rename one first' });
+
+    const now = Date.now();
+    const im = { _id: crypto.randomBytes(6).toString('hex'), user_id: req.uid, capsule_id: cap._id, capsule_name: cap.name, playlist_id: pid, playlist_name: pl.name || null, playlist_total: pl.total, status: 'running', created_at: new Date(now) };
+    try {
+      await imports.insertOne(im);
+      await importItems.insertMany(pl.tracks.map((t, i) => ({
+        _id: `${im._id}:${i}`, import_id: im._id, user_id: req.uid, capsule_id: cap._id, idx: i,
+        track_id: t.id, spotify_url: `https://open.spotify.com/track/${t.id}`, title: t.title, artist: t.artist, image: t.image,
+        status: 'pending', attempts: 0, error: null, order: now * 1000 + i, created_at: new Date(now), retry_at: new Date(now),
+      })));
+    } catch (e) {   // nothing queued -> don't leave an empty capsule behind
+      await Promise.all([imports.deleteOne({ _id: im._id }), capsules.deleteOne({ _id: cap._id }), importItems.deleteMany({ import_id: im._id })]).catch(() => {});
+      throw e;
+    }
+    log(`import ${im._id} queued: ${pl.tracks.length}/${pl.total} tracks of "${pl.name}" for user ${req.uid} -> capsule ${cap._id}`);
+    pumpImports();
+    res.status(201).json(await importView(im));
+  }));
+
+  app.get('/me/imports', auth, wrap(async (req, res) => {
+    const list = await imports.find({ user_id: req.uid }).sort({ created_at: -1 }).limit(10).toArray();
+    res.json({ imports: await Promise.all(list.map(im => importView(im, false))) });
+  }));
+
+  app.get('/me/imports/:id', auth, wrap(async (req, res) => {
+    const im = await imports.findOne({ _id: String(req.params.id), user_id: req.uid });
+    if (!im) return res.status(404).json({ error: 'import not found' });
+    res.json(await importView(im));
+  }));
+
+  // failed songs go back in line with a fresh set of attempts
+  app.post('/me/imports/:id/retry', auth, wrap(async (req, res) => {
+    const im = await imports.findOne({ _id: String(req.params.id), user_id: req.uid });
+    if (!im) return res.status(404).json({ error: 'import not found' });
+    const r = await importItems.updateMany({ import_id: im._id, status: 'failed' }, { $set: { status: 'pending', attempts: 0, error: null, retry_at: new Date() }, $unset: { expire_at: '' } });
+    if (r.modifiedCount) {
+      await imports.updateOne({ _id: im._id }, { $set: { status: 'running' }, $unset: { expire_at: '', finished_at: '' } });
+      await importItems.updateMany({ import_id: im._id }, { $unset: { expire_at: '' } });
+      pumpImports();
+    }
+    res.json(await importView(im));
   }));
 
   // ===== facets, genre capsules, appearance =====
@@ -1387,6 +1449,260 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false, final = t
   }
 }
 
+// ---------- Spotify import ----------
+// New capsule -> "Import from Spotify". A playlist link becomes one durable item per track (collection spotify_import_items, first IMPORT_LIMIT only),
+// worked by IMPORT_WORKERS workers the same way as the audio job line: everything is in Mongo before work starts, a restart / hang / failure puts the item
+// back in line (with backoff) and an item is only given up on after IMPORT_MAX_ATTEMPTS tries. The frontend polls GET /me/imports/:id, so progress survives reloads.
+// Per track: prexzyapis returns a fresh signed download_url -> download (length + duration verified) -> Hugging Face -> song row -> capsule row at the playlist position.
+const IMPORT_LIMIT = 50, IMPORT_MAX_ATTEMPTS = 5, IMPORT_WORKERS = 2, IMPORT_ITEM_TIMEOUT_MS = 8 * 60 * 1000;
+const IMPORT_API = process.env.SPOTIFY_DL_API || 'https://prexzyapis.com/download/spotify';
+const IMPORT_MIN_BYTES = 100 * 1024, IMPORT_MAX_BYTES = 80 * 1024 ** 2;
+const SP_UA = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36';
+const is11000 = e => e?.code === 11000;
+const retry = async (fn, tries, base = 1000) => { for (let i = 1; ; i++) { try { return await fn(i); } catch (e) { if (i >= tries) throw e; await sleep(base * 2 ** (i - 1)); } } };
+
+// ---- reading the playlist (no Spotify API key: the page ships its first 30 tracks as base64 JSON, the embed page up to 100) ----
+const spPlaylistId = u => String(u || '').trim().match(/^https?:\/\/open\.spotify\.com\/(?:intl-[a-z-]+\/)?playlist\/([A-Za-z0-9]{10,40})/i)?.[1] || null;   // host is pinned, so a user can't point the server elsewhere
+const spTrackId = uri => String(uri || '').match(/track[:/]([A-Za-z0-9]{10,40})/)?.[1] || null;
+async function spGet(url) {
+  const r = await fetch(url, { headers: { 'User-Agent': SP_UA, 'Accept-Language': 'en' }, signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error(`Spotify HTTP ${r.status}`);
+  return r.text();
+}
+function spParsePage(html, id) {
+  const b64 = html.match(/id="initialState"[^>]*>([^<]+)</)?.[1];
+  if (!b64) return null;
+  const pl = JSON.parse(Buffer.from(b64, 'base64').toString('utf8')).entities?.items?.[`spotify:playlist:${id}`];
+  if (!pl) return null;
+  const tracks = [];
+  for (const i of pl.content?.items || []) {
+    const d = i.itemV2?.data, tid = d?.__typename === 'Track' ? spTrackId(d.uri) : null;
+    if (!tid) continue;
+    const imgs = d.albumOfTrack?.coverArt?.sources || [];
+    tracks.push({
+      id: tid, title: d.name,
+      artist: (d.artists?.items || []).map(a => a.profile?.name).filter(Boolean).join(', '),
+      image: imgs.reduce((a, b) => ((b.width || 0) > (a?.width || 0) ? b : a), null)?.url || null,
+    });
+  }
+  return { name: pl.name, total: pl.content?.totalCount ?? tracks.length, tracks };
+}
+function spParseEmbed(html) {
+  const raw = html.match(/<script id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/)?.[1];
+  if (!raw) return [];
+  return (JSON.parse(raw).props?.pageProps?.state?.data?.entity?.trackList || [])
+    .map(t => ({ id: spTrackId(t.uri), title: t.title, artist: String(t.subtitle || '').replace(/\u00a0/g, ' '), image: null }))
+    .filter(t => t.id);
+}
+// first IMPORT_LIMIT distinct tracks, in playlist order
+async function spFetchPlaylist(id) {
+  const page = await retry(async () => {
+    const p = spParsePage(await spGet(`https://open.spotify.com/playlist/${id}`), id);
+    if (!p) throw new Error('playlist page not readable');
+    return p;
+  }, 3);
+  let tracks = page.tracks;
+  if (tracks.length < Math.min(IMPORT_LIMIT, page.total)) {   // the page only carries the first 30
+    try {
+      const emb = await retry(async () => {
+        const e = spParseEmbed(await spGet(`https://open.spotify.com/embed/playlist/${id}`));
+        if (!e.length) throw new Error('embed has no tracks');
+        return e;
+      }, 2);
+      if (emb.length > tracks.length) { const img = new Map(tracks.map(t => [t.id, t.image])); tracks = emb.map(t => ({ ...t, image: img.get(t.id) || null })); }
+    } catch (e) { log(`spotify embed fallback failed: ${e.message}`); }
+  }
+  tracks = [...new Map(tracks.map(t => [t.id, t])).values()].slice(0, IMPORT_LIMIT);
+  if (!tracks.length) throw new Error('no songs found');
+  return { name: page.name, total: page.total, tracks };
+}
+
+// ---- one track: resolve -> download -> verify ----
+async function spResolve(trackId) {
+  return retry(async () => {
+    const r = await fetch(`${IMPORT_API}?url=${encodeURIComponent(`https://open.spotify.com/track/${trackId}`)}`, { headers: { 'User-Agent': SP_UA, Accept: 'application/json' }, signal: AbortSignal.timeout(45000) });
+    const j = await r.json().catch(() => null), d = j?.data;
+    if (!r.ok || j?.status !== true || !d?.download_url) throw new Error(`download api: ${j?.message || j?.error || `HTTP ${r.status}`}`);
+    if (!/^https:\/\//i.test(d.download_url)) throw new Error('download api: bad download_url');
+    return d;
+  }, 2, 1500);
+}
+async function spDownload(url) {
+  const r = await fetch(url, { headers: { 'User-Agent': SP_UA }, signal: AbortSignal.timeout(180000) });
+  if (!r.ok) throw new Error(`download HTTP ${r.status}`);
+  const len = Number(r.headers.get('content-length')) || 0;
+  if (len > IMPORT_MAX_BYTES) throw new Error(`file too large (${mb(len)})`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (len && !r.headers.get('content-encoding') && buf.length !== len) throw new Error(`download cut short (${buf.length}/${len} bytes)`);
+  if (buf.length < IMPORT_MIN_BYTES || buf.length > IMPORT_MAX_BYTES || buf[0] === 0x7b || buf[0] === 0x3c) throw new Error(`download is not audio (${buf.length} bytes)`);   // { or < = a JSON / HTML error page
+  return buf;
+}
+async function spCover(url, trackId) {
+  if (!url) return null;
+  const r = await ft(url);
+  if (!r.ok) return null;
+  const buf = Buffer.from(await r.arrayBuffer()), t = sniffImage(buf);
+  if (!t || buf.length < 3000) return null;
+  return uploadToHost(buf, `sp_${trackId}_cover${t.ext}`, t.mime);
+}
+
+// returns { song_id, reused }. Throws on any failure: nothing half-saved is ever written (the song row is the last step), so a retry starts clean.
+async function importTrack(it, ctx) {
+  const alive = () => { if (ctx.dead) throw new Error('timed out'); };
+  if (!(await capsules.findOne({ _id: it.capsule_id, user_id: it.user_id }, { projection: { _id: 1 } }))) throw Object.assign(new Error('capsule was deleted'), { cancel: true });
+  const key = `sp:${it.track_id}`, find = () => songs.findOne({ chat_id: it.user_id, file_unique_id: key }, { projection: { song_id: 1 } });
+  let song = await find(), reused = !!song;   // already in this library (earlier import, same track twice): don't download again
+
+  if (!song) {
+    const meta = await spResolve(it.track_id);
+    alive();
+    const ext = /^[a-z0-9]{2,4}$/.test(meta.format || '') ? meta.format : 'mp3', mime = ext === 'mp3' ? 'audio/mpeg' : `audio/${ext}`;
+    const buf = await retry(() => spDownload(meta.download_url), 2, 2000);
+    alive();
+
+    let tags;
+    try { tags = await mm.parseBuffer(buf, { mimeType: mime }, { duration: true }); }
+    catch (e) { throw new Error(`downloaded file is not valid audio: ${e.message}`); }
+    const c = tags.common, f = tags.format, want = meta.duration_ms ? meta.duration_ms / 1000 : 0;
+    if (want && f.duration && f.duration < want - Math.max(5, want * 0.08)) throw new Error(`audio is ${Math.round(f.duration)}s, expected ${Math.round(want)}s (cut short)`);
+
+    const title = meta.title || it.title || 'Unknown', artist = meta.artist || it.artist || null;
+    const doc = {
+      chat_id: it.user_id, message_id: null, user_id: it.user_id,
+      file_id: null, file_unique_id: key,
+      file_name: `${artist ? artist + ' - ' : ''}${title}.${ext}`.replace(/[\\/:*?"<>|]+/g, ''),
+      mime_type: mime, file_size: buf.length,
+      duration: Math.round(f.duration || want) || null,
+      title, artist,
+      tg_thumb_file_id: null,
+      upload_url: null, hf_url: null, upload_code: null,
+      cover_url: null,
+      album: meta.album || c.album || null, album_artist: c.albumartist || null, year: c.year || null, genre: c.genre || null,
+      release_date: null, label: null, explicit: null, deezer_meta: false,
+      track_no: c.track?.no || null, bitrate: f.bitrate ? Math.round(f.bitrate) : null, sample_rate: f.sampleRate || null, codec: f.codec || f.container || null,
+      uploaded: false, upload_error: null,
+      song_id: await genSongId(),
+      listens: 0,
+      poster_url: null, deezer_id: null, image_url: null,
+      source: 'spotify', spotify_id: it.track_id, spotify_url: it.spotify_url, import_id: it.import_id,
+      created_at: new Date(),
+    };
+
+    try {   // Deezer poster + genre / release date / label, same as audio messages
+      const p = await findPosterSmart({ title, artist, duration: doc.duration });
+      if (p) {
+        applyDeezerMeta(doc, p);
+        if (p.buf) doc.poster_url = (await uploadToHost(p.buf, `sp_${it.track_id}_poster.jpg`, 'image/jpeg')).short_url;
+      }
+    } catch (e) { console.warn(`[${new Date().toISOString()}] [import] poster failed:`, e.message); }
+    try { const cv = await spCover(it.image || meta.cover, it.track_id); if (cv) doc.cover_url = cv.short_url; }
+    catch (e) { console.warn(`[${new Date().toISOString()}] [import] cover failed:`, e.message); }
+    alive();
+
+    const up = await retry(() => uploadToHost(buf, `sp_${it.track_id}.${ext}`, mime), 3, 2000);   // buffer is in hand, so retry the upload alone instead of downloading again
+    doc.upload_url = up.short_url; doc.upload_code = up.code; doc.hf_url = up.hf_url || null; doc.uploaded = true;
+    doc.image_url = doc.poster_url || doc.cover_url;
+    alive();
+
+    try {
+      await songs.insertOne(doc);
+      await users.updateOne({ _id: it.user_id }, { $set: { updated_at: new Date() }, $setOnInsert: { first_seen: new Date() }, $inc: { song_count: 1 } }, { upsert: true });
+      song = doc;
+    } catch (e) {
+      if (!is11000(e)) throw e;   // a parallel attempt saved it first: use that row
+      song = await find(); reused = true;
+      if (!song) throw e;
+    }
+  }
+
+  // capsule order = playlist order, whatever order the workers finish in
+  await capSongs.insertOne({ capsule_id: it.capsule_id, user_id: it.user_id, song_id: song.song_id, pos: GAP * (it.idx + 1), added_at: new Date() })
+    .catch(e => { if (!is11000(e)) throw e; });
+  return { song_id: song.song_id, reused };
+}
+
+// ---- progress ----
+const importCounts = items => items.reduce((c, x) => (c[x.status] = (c[x.status] || 0) + 1, c), {});
+const importStatus = c => ((c.pending || 0) + (c.processing || 0) ? 'running' : c.cancelled ? 'cancelled' : c.failed ? (c.done ? 'partial' : 'failed') : 'done');
+
+async function importView(im, withItems = true) {
+  const items = await importItems.find({ import_id: im._id }).sort({ idx: 1 })
+    .project({ idx: 1, track_id: 1, title: 1, artist: 1, image: 1, status: 1, attempts: 1, error: 1, reused: 1 }).toArray();
+  const counts = importCounts(items);
+  return {
+    id: im._id, status: importStatus(counts),
+    capsule_id: im.capsule_id, capsule_name: im.capsule_name, playlist_name: im.playlist_name, playlist_total: im.playlist_total,
+    total: items.length, counts, created_at: im.created_at, finished_at: im.finished_at || null,
+    job_url: `${BASE}/manage?import=${im._id}`,
+    ...(withItems ? { items: items.map(({ _id, ...x }) => x) } : {}),
+  };
+}
+
+// stored copy of the status (the API recomputes it live). Finished imports expire after a few days; running ones never do.
+async function refreshImport(id) {
+  const agg = await importItems.aggregate([{ $match: { import_id: id } }, { $group: { _id: '$status', n: { $sum: 1 } } }]).toArray();
+  const c = Object.fromEntries(agg.map(x => [x._id, x.n])), status = importStatus(c), now = new Date();
+  if (status === 'running') return imports.updateOne({ _id: id }, { $set: { status, counts: c, updated_at: now }, $unset: { expire_at: '', finished_at: '' } });
+  const exp = new Date(Date.now() + (c.failed ? 14 : 3) * DAY);
+  await Promise.all([
+    imports.updateOne({ _id: id }, { $set: { status, counts: c, updated_at: now, finished_at: now, expire_at: exp } }),
+    importItems.updateMany({ import_id: id }, { $set: { expire_at: exp } }),
+  ]);
+}
+
+// ---- workers ----
+async function runImportItem(it) {
+  const ctx = { dead: false };
+  log(`import ${it._id} start attempt ${it.attempts}/${IMPORT_MAX_ATTEMPTS} (${it.title} - ${it.artist})`);
+  let set;
+  try {
+    const r = await withTimeout(importTrack(it, ctx), IMPORT_ITEM_TIMEOUT_MS, 'track');
+    set = { status: 'done', song_id: r.song_id, reused: r.reused, error: null, done_at: new Date() };
+    log(`import ${it._id} done song_id=${r.song_id}${r.reused ? ' (already in library)' : ''}`);
+  } catch (e) {
+    ctx.dead = true;   // a timed-out attempt stops at its next checkpoint instead of racing the retry
+    const msg = (e?.message || String(e)).slice(0, 300);
+    console.error(`[${new Date().toISOString()}] [import] ${it._id} attempt ${it.attempts} failed: ${msg}`);
+    if (e?.cancel) set = { status: 'cancelled', error: msg };
+    else if (it.attempts >= IMPORT_MAX_ATTEMPTS) set = { status: 'failed', error: msg };
+    else set = { status: 'pending', error: msg, retry_at: new Date(Date.now() + Math.min(120000, 5000 * 3 ** (it.attempts - 1))) };   // 5s, 15s, 45s, 2min
+  }
+  try {
+    await importItems.updateOne({ _id: it._id }, { $set: set });
+    if (set.status === 'cancelled') await importItems.updateMany({ import_id: it.import_id, status: 'pending' }, { $set: { status: 'cancelled', error: set.error } });
+    await refreshImport(it.import_id);
+  } catch (e2) { console.error(`[${new Date().toISOString()}] [import] could not update ${it._id} (the poller will recover it):`, e2.message); }
+}
+
+let importWorkers = 0;
+function pumpImports() {
+  while (importWorkers < IMPORT_WORKERS) {
+    importWorkers++;
+    (async () => {
+      try {
+        for (;;) {
+          const it = await importItems.findOneAndUpdate(
+            { status: 'pending', retry_at: { $lte: new Date() } },
+            { $set: { status: 'processing', started_at: new Date() }, $inc: { attempts: 1 } },
+            { sort: { order: 1 }, returnDocument: 'after' });
+          if (!it) break;
+          await runImportItem(it);
+        }
+      } catch (e) { console.error(`[${new Date().toISOString()}] [import] pump error (poller will retry):`, e.message); }
+      finally { importWorkers--; }
+    })();
+  }
+}
+
+// every 10s: rescue items stuck in "processing", fix any stored status that lost a race, wake due retries
+async function importTick() {
+  try {
+    await importItems.updateMany({ status: 'processing', started_at: { $lt: new Date(Date.now() - IMPORT_ITEM_TIMEOUT_MS - 60000) } }, { $set: { status: 'pending', retry_at: new Date() } });
+    for (const s of await imports.find({ status: 'running' }).limit(20).project({ _id: 1 }).toArray()) await refreshImport(s._id);
+  } catch {}
+  pumpImports();
+}
+
 // ---------- handlers ----------
 bot.use((ctx, next) => {
   const t = ctx.message?.text || ctx.message?.caption || '';
@@ -1551,6 +1867,8 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   capsules = db.collection('capsules');
   capSongs = db.collection('capsule_songs');
   jobs = db.collection('jobs');
+  imports = db.collection('spotify_imports');
+  importItems = db.collection('spotify_import_items');
   lhours = db.collection('listen_hours');
   await lhours.createIndex({ h: 1, song_id: 1 });
   await lhours.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
@@ -1558,8 +1876,15 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   await nowp.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
   await jobs.createIndex({ status: 1, retry_at: 1, order: 1 });
   await jobs.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
+  await imports.createIndex({ user_id: 1, created_at: -1 });
+  await imports.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
+  await importItems.createIndex({ status: 1, retry_at: 1, order: 1 });
+  await importItems.createIndex({ import_id: 1, idx: 1 });
+  await importItems.createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
   const back = await jobs.updateMany({ status: 'processing' }, { $set: { status: 'pending', retry_at: new Date() } });   // interrupted by a restart: back in line
   if (back.modifiedCount) log(`requeued ${back.modifiedCount} interrupted job(s)`);
+  const backI = await importItems.updateMany({ status: 'processing' }, { $set: { status: 'pending', retry_at: new Date() } });   // same for Spotify import items
+  if (backI.modifiedCount) log(`requeued ${backI.modifiedCount} interrupted import item(s)`);
   await queues.createIndex({ updated_at: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
   await songs.createIndex({ chat_id: 1, file_unique_id: 1 }, { unique: true });
   await songs.createIndex({ song_id: 1 }, { unique: true, sparse: true });
@@ -1576,9 +1901,11 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   await songs.createIndex({ user_id: 1, release_date: -1 });
   startApi({ songs, users, queues });
   pump();
+  pumpImports();
   setInterval(async () => {   // safety net: wake due retries, rescue jobs stuck in "processing"
     try { await jobs.updateMany({ status: 'processing', started_at: { $lt: new Date(Date.now() - JOB_TIMEOUT_MS - 60000) } }, { $set: { status: 'pending', retry_at: new Date() } }); } catch {}
     pump();
+    importTick();
   }, 10000);
   if (process.env.BACKFILL_DEEZER === '1') backfillDeezer().catch(e => console.error('[deezer backfill] failed:', e));
   try {
