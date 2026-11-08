@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 
 const { BOT_TOKEN, MONGO_URI, HF_TOKEN, HF_USERNAME, HF_BACKUP_ACCOUNTS = '' } = process.env;
-const SHORT_URL_BASE = process.env.SHORT_URL_BASE ?? (process.env.BASE_URL ? process.env.BASE_URL.replace(/\/$/, '') + '/' : ''); // short-link prefix; empty = raw HF urls
+const SHORT_URL_BASE = (process.env.SHORT_URL_BASE ?? 'https://music-production-5aeb.up.railway.app').replace(/\/+$/, '') + '/'; // short-link prefix stored in mongo (song audio, covers, posters, profile images)
 const UPLOADER_DB = process.env.UPLOADER_DB || 'xcatbox_clone'; // same db the python uploader / short-url service uses
 const MAX_DATASET_SIZE = 12 * 1024 ** 3;   // 12GB per dataset
 const MAX_ACCOUNT_STORAGE = 150 * 1024 ** 3; // 150GB per account
@@ -1899,6 +1899,16 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   await songs.createIndex({ user_id: 1, artist: 1 });
   await songs.createIndex({ user_id: 1, genre: 1 });
   await songs.createIndex({ user_id: 1, release_date: -1 });
+  // one-time (idempotent) migration: point every stored short link (<host>/<6 chars>.<ext>) at SHORT_URL_BASE
+  try {
+    const esc = SHORT_URL_BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const oldLink = /^https?:\/\/(?!huggingface\.co\/)[^\/]+\/[a-z0-9]{6}\.[a-z0-9]+$/, isNew = new RegExp('^' + esc);
+    const rewrite = f => [{ $set: { [f]: { $concat: [SHORT_URL_BASE, { $arrayElemAt: [{ $split: ['$' + f, '/'] }, -1] }] } } }];
+    for (const [col, f] of [[songs, 'upload_url'], [songs, 'cover_url'], [songs, 'poster_url'], [songs, 'image_url'], [users, 'theme.avatar'], [users, 'theme.bgImage']]) {
+      const r = await col.updateMany({ $and: [{ [f]: oldLink }, { [f]: { $not: isNew } }] }, rewrite(f));
+      if (r.modifiedCount) log(`url migration: ${f} -> ${r.modifiedCount} updated`);
+    }
+  } catch (e) { console.warn(`[${new Date().toISOString()}] [audio] url migration failed:`, e.message); }
   startApi({ songs, users, queues });
   pump();
   pumpImports();
