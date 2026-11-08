@@ -1141,7 +1141,7 @@ async function runJob(job) {
       if (final) {
         await jobs.updateOne({ _id: job._id }, { $set: { status: 'failed', error: msg, expire_at: new Date(Date.now() + 14 * DAY) } });
         await clearReact(job.chat.id, job.message_id);
-        await say(ctx, `⚠️ Could not save this song after ${job.attempts} tries: ${msg}`, job.message_id);
+        await sayAuto(ctx, job.chat, `⚠️ Could not save this song after ${job.attempts} tries: ${msg}`, job.message_id);
       } else {
         const wait = Math.min(60000, 3000 * 2 ** (job.attempts - 1));
         await jobs.updateOne({ _id: job._id }, { $set: { status: 'pending', error: msg, retry_at: new Date(Date.now() + wait) } });
@@ -1247,31 +1247,17 @@ async function uploadToHost(buf, filename, mime) {
       console.warn(`[${new Date().toISOString()}] [audio] hf FAILED ${username}: ${e.message}`);
     }
   }
-  // Hugging Face failed (429, full, no accounts...): fall back to catbox
-  log(`hf unavailable (${errors.join('; ').slice(0, 300) || 'none configured'}), falling back to catbox file=${filename}`);
-  try {
-    const url = await retry(() => uploadToCatbox(buf, filename, mime), 3, 2000);
-    log(`catbox ok ${url}`);
-    return { short_url: url, code: null, hf_url: null };
-  } catch (e) {
-    console.error(`[${new Date().toISOString()}] [audio] catbox FAILED:`, e.message);
-    throw new Error('upload failed, try again later');
-  }
-}
-
-// catbox.moe backup host (set CATBOX_USERHASH to tie uploads to an account, optional)
-async function uploadToCatbox(buf, filename, mime) {
-  const fd = new FormData();
-  fd.append('reqtype', 'fileupload');
-  if (process.env.CATBOX_USERHASH) fd.append('userhash', process.env.CATBOX_USERHASH);
-  fd.append('fileToUpload', new Blob([buf], { type: mime || 'application/octet-stream' }), filename);
-  const r = await fetch('https://catbox.moe/user/api.php', { method: 'POST', body: fd, signal: AbortSignal.timeout(180000) });
-  const t = (await r.text()).trim();
-  if (!r.ok || !/^https?:\/\//.test(t)) throw new Error(`catbox ${r.status}: ${t.slice(0, 200)}`);
-  return t;
+  console.error(`[${new Date().toISOString()}] [audio] upload failed on all Hugging Face accounts: ${errors.join('; ').slice(0, 500) || 'none configured'}`);
+  throw new Error('upload failed, try again later');   // full reason is in the log, not in the chat
 }
 
 // reply that never throws but always logs why it failed; retries without reply_parameters (deleted msg / topic quirks)
+// automatic status messages (saved / failed): shown in private chats only, groups stay quiet (logged instead)
+const isGroupChat = c => c?.type === 'group' || c?.type === 'supergroup';
+async function sayAuto(ctx, chat, text, replyTo) {
+  if (isGroupChat(chat)) return log(`quiet in group chat=${chat.id}: ${text}`);
+  return say(ctx, text, replyTo);
+}
 async function say(ctx, text, replyTo) {
   const chatId = ctx.chat?.id;
   try {
@@ -1464,10 +1450,10 @@ async function processAudio(ctx, a, msg = ctx.message, manual = false, final = t
 
   const label = `${song.title}${song.artist ? ' — ' + song.artist : ''}`;
   if (song.uploaded) {
-    if (!(await react(ctx, chat.id, message_id))) await say(ctx, `✅ Saved: ${label}`, message_id); // fall back to a reply only if reacting is impossible here
+    if (!(await react(ctx, chat.id, message_id))) await sayAuto(ctx, chat, `✅ Saved: ${label}`, message_id); // fall back to a reply only if reacting is impossible here
   } else {
     await clearReact(chat.id, message_id);
-    await say(ctx, `⚠️ Logged (not uploaded: ${song.upload_error}): ${label}`, message_id);
+    await sayAuto(ctx, chat, `⚠️ Logged (not uploaded: ${song.upload_error}): ${label}`, message_id);
   }
 }
 
@@ -1851,7 +1837,7 @@ async function onAudioMsg(ctx, m, next, edited = false) {
   if (a && (ctx.from?.is_bot || m.sender_chat)) {
     log(`IGNORED audio msg=${m.message_id} chat=${m.chat.id} from=${who(ctx.from)} sender_chat=${m.sender_chat?.id || '-'}`);
     if (!edited && (m.sender_chat || [1087968824, 136817688].includes(ctx.from?.id)))   // anonymous admin / channel identity: no real user to credit
-      await say(ctx, '⚠️ I can’t save songs sent anonymously or as a channel. Send it from your own account.', m.message_id);
+      await sayAuto(ctx, m.chat, '⚠️ I can’t save songs sent anonymously or as a channel. Send it from your own account.', m.message_id);
     return;
   }
   if (!a) {
@@ -1865,7 +1851,7 @@ async function onAudioMsg(ctx, m, next, edited = false) {
   }
   log(`received audio${edited ? ' (edited)' : ''}${m.via_bot ? ` via @${m.via_bot.username}` : ''} chat=${m.chat.id} (${m.chat.type}) from=${who(ctx.from)} msg=${m.message_id}`);
   try { await enqueueAudio(m, a); }   // saved to Mongo before we return, so Telegram only moves on once the song is safely in line
-  catch (e) { console.error(`[${new Date().toISOString()}] [audio] enqueue failed:`, e); await say(ctx, '⚠️ Could not queue this song, please send it again.', m.message_id); }
+  catch (e) { console.error(`[${new Date().toISOString()}] [audio] enqueue failed:`, e); await sayAuto(ctx, m.chat, '⚠️ Could not queue this song, please send it again.', m.message_id); }
 }
 bot.on('message', (ctx, next) => onAudioMsg(ctx, ctx.message, next));
 bot.on('edited_message', (ctx, next) => onAudioMsg(ctx, ctx.editedMessage, next, true));
@@ -1921,10 +1907,39 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   await songs.createIndex({ user_id: 1, artist: 1 });
   await songs.createIndex({ user_id: 1, genre: 1 });
   await songs.createIndex({ user_id: 1, release_date: -1 });
+  // one-time (idempotent) catbox cleanup: delete songs whose audio is on catbox, drop catbox images, delete capsules that only held those songs
+  try {
+    const cb = /catbox\.moe/i;
+    const bad = await songs.find({ upload_url: cb }, { projection: { song_id: 1, user_id: 1 } }).toArray();
+    if (bad.length) {
+      const ids = bad.map(x => x.song_id).filter(Boolean), chunks = [];
+      for (let i = 0; i < ids.length; i += 2000) chunks.push(ids.slice(i, i + 2000));
+      const hit = new Set();
+      for (const c of chunks) for (const x of await capSongs.find({ song_id: { $in: c } }, { projection: { capsule_id: 1 } }).toArray()) hit.add(x.capsule_id);
+      let capsDeleted = 0;
+      for (const cid of hit) {   // regular capsule whose songs are all catbox -> delete it (checked before the songs go)
+        const total = await capSongs.countDocuments({ capsule_id: cid });
+        const nBad = await capSongs.countDocuments({ capsule_id: cid, song_id: { $in: ids } });
+        if (total > 0 && total === nBad) { await Promise.all([capsules.deleteOne({ _id: cid }), capSongs.deleteMany({ capsule_id: cid })]); capsDeleted++; }
+      }
+      const perUser = new Map();
+      for (const x of bad) perUser.set(x.user_id, (perUser.get(x.user_id) || 0) + 1);
+      for (const c of chunks) {
+        await capSongs.deleteMany({ song_id: { $in: c } });
+        await capsules.updateMany({}, { $pull: { include: { $in: c }, excluded: { $in: c } } });
+        await songs.deleteMany({ song_id: { $in: c } });
+      }
+      for (const [uid, n] of perUser) await users.updateOne({ _id: uid }, { $inc: { song_count: -n } });
+      log(`catbox cleanup: ${bad.length} song(s) deleted, ${capsDeleted} capsule(s) deleted`);
+    }
+    for (const f of ['cover_url', 'poster_url']) await songs.updateMany({ [f]: cb }, { $set: { [f]: null } });
+    await songs.updateMany({ image_url: cb }, [{ $set: { image_url: { $ifNull: ['$poster_url', '$cover_url'] } } }]);
+    for (const f of ['theme.avatar', 'theme.bgImage']) await users.updateMany({ [f]: cb }, { $unset: { [f]: '' } });
+  } catch (e) { console.warn(`[${new Date().toISOString()}] [audio] catbox cleanup failed:`, e.message); }
   // one-time (idempotent) migration: point every stored short link (<host>/<6 chars>.<ext>) at SHORT_URL_BASE
   try {
     const esc = SHORT_URL_BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const oldLink = /^https?:\/\/(?!huggingface\.co\/|files\.catbox\.moe\/)[^\/]+\/[a-z0-9]{6}\.[a-z0-9]+$/, isNew = new RegExp('^' + esc);
+    const oldLink = /^https?:\/\/(?!huggingface\.co\/)[^\/]+\/[a-z0-9]{6}\.[a-z0-9]+$/, isNew = new RegExp('^' + esc);
     const rewrite = f => [{ $set: { [f]: { $concat: [SHORT_URL_BASE, { $arrayElemAt: [{ $split: ['$' + f, '/'] }, -1] }] } } }];
     for (const [col, f] of [[songs, 'upload_url'], [songs, 'cover_url'], [songs, 'poster_url'], [songs, 'image_url'], [users, 'theme.avatar'], [users, 'theme.bgImage']]) {
       const r = await col.updateMany({ $and: [{ [f]: oldLink }, { [f]: { $not: isNew } }] }, rewrite(f));
