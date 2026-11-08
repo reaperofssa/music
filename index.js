@@ -3,6 +3,7 @@ const { Telegraf, Markup } = require('telegraf');
 const { MongoClient } = require('mongodb');
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs'), fsp = fs.promises;
 const express = require('express');
 const cors = require('cors');
 
@@ -13,11 +14,17 @@ const UPLOADER_DB = process.env.UPLOADER_DB || 'xcatbox_clone'; // same db the p
 const MAX_DATASET_SIZE = 12 * 1024 ** 3;   // 12GB per dataset
 const MAX_ACCOUNT_STORAGE = 150 * 1024 ** 3; // 150GB per account
 const DEST_DIR = 'uploads';
+// files are staged on Railway first (serve from there), then pushed to Hugging Face BATCH_SIZE at a time as ONE commit.
+// STAGE_DIR must be a Railway volume mount (e.g. /data/stage) or staged files are lost on redeploy.
+const BATCH_SIZE = Number(process.env.BATCH_SIZE || 10);
+const BATCH_MAX_AGE_MS = Number(process.env.BATCH_MAX_AGE_MIN || 10) * 60000;   // flush a partial batch after this long so nothing waits forever
+let STAGE_DIR = path.resolve(process.env.STAGE_DIR || '/data/stage');
+try { fs.mkdirSync(STAGE_DIR, { recursive: true }); } catch (e) { STAGE_DIR = path.resolve('stage'); fs.mkdirSync(STAGE_DIR, { recursive: true }); console.warn('[stage] could not use STAGE_DIR, falling back to', STAGE_DIR); }
 const log = (...a) => console.log(`[${new Date().toISOString()}] [audio]`, ...a);
 const who = u => u ? `${u.id}${u.username ? ' @' + u.username : ''}` : '?';
 const mb = n => n ? (n / 1048576).toFixed(2) + 'MB' : '?';
 const bot = new Telegraf(BOT_TOKEN);
-let users, songs, queues, capsules, capSongs, jobs, imports, importItems, mm, hub, hfFiles, hfSettings, nowp, lhours;
+let users, songs, queues, capsules, capSongs, jobs, imports, importItems, mm, hub, hfFiles, hfSettings, stagedFiles, nowp, lhours;
 const HOUR = 3600 * 1000;
 const DEFAULT_BOT_USERNAME = 'playIistsbot';   // used for Mini App links until the bot reports its own username
 
@@ -1075,10 +1082,21 @@ function startApi({ songs, users, queues }) {
   const port = process.env.PORT || 3000;
   // short links: /<code>.<ext> -> the file on Hugging Face (keep this last so it never shadows other routes)
   app.get(/^\/([a-z0-9]{6})(\.[a-z0-9]+)?$/, wrap(async (req, res) => {
-    const f = await hfFiles.findOne({ short_code: req.params[0] }, { projection: { hf_url: 1 } });
-    if (!f) return res.status(404).json({ error: 'file not found' });
-    res.set('Cache-Control', 'public, max-age=86400');
-    res.redirect(302, f.hf_url);
+    const code = req.params[0];
+    const toHf = async () => {
+      const f = await hfFiles.findOne({ short_code: code }, { projection: { hf_url: 1 } });
+      if (!f) return false;
+      res.set('Cache-Control', 'public, max-age=86400');
+      res.redirect(302, f.hf_url);
+      return true;
+    };
+    if (await toHf()) return;
+    const st = await stagedFiles.findOne({ short_code: code }, { projection: { file_name: 1 } });   // not on HF yet: serve the staged copy from Railway (range requests work)
+    if (!st) return res.status(404).json({ error: 'file not found' });
+    res.sendFile(path.join(STAGE_DIR, st.file_name), { cacheControl: false, headers: { 'Cache-Control': 'public, max-age=86400' } }, async err => {
+      if (!err || res.headersSent) return;
+      if (!(await toHf())) res.status(404).json({ error: 'file not found' });   // it was just flushed to HF, or the file is gone
+    });
   }));
 
   app.listen(port, () => console.log(`api on :${port}`));
@@ -1190,8 +1208,17 @@ async function shortCode(len = 6) {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   for (;;) {
     const code = Array.from(crypto.randomBytes(len), b => chars[b % chars.length]).join('');
-    if (!(await hfFiles.findOne({ short_code: code }, { projection: { _id: 1 } }))) return code;
+    if (!(await hfFiles.findOne({ short_code: code }, { projection: { _id: 1 } })) && !(await stagedFiles.findOne({ short_code: code }, { projection: { _id: 1 } }))) return code;
   }
+}
+
+// HF caps commits per repo (128/hour). A repo that hits the cap is skipped until its cooldown ends, uploads go to another dataset meanwhile.
+const repoCooldown = new Map();   // "user/dataset" -> timestamp when it can be used again
+const repoCooling = r => (repoCooldown.get(r) || 0) > Date.now();
+function repoCool(r, msg) {
+  const m = /in (\d+) minutes?/i.exec(msg || ''), mins = m ? Number(m[1]) + 1 : 10;
+  repoCooldown.set(r, Date.now() + mins * 60000);
+  log(`hf ${r}: rate limited, skipping it for ${mins} min`);
 }
 
 async function ensureDataset(repoName, token) {
@@ -1203,52 +1230,106 @@ async function ensureDataset(repoName, token) {
   });
 }
 
-// uploads one buffer straight to Hugging Face, trying each account in order. returns { short_url, code, hf_url }
+// uploadToHost stages the file on Railway and returns its short link right away (served from Railway until it reaches Hugging Face).
+// returns { short_url, code, hf_url: null }
 async function uploadToHost(buf, filename, mime) {
-  const size = buf.length;
-  const ext = path.extname(filename);
+  const ext = path.extname(filename).toLowerCase();
+  let code;
+  for (let i = 0; ; i++) {
+    code = await shortCode();
+    try {
+      await stagedFiles.insertOne({ short_code: code, ext, file_name: `${code}${ext}`, original_path: filename, mime: mime || null, size: buf.length, created_at: new Date() });
+      break;
+    } catch (e) { if (e?.code === 11000 && i < 5) continue; throw e; }
+  }
+  try { await fsp.writeFile(path.join(STAGE_DIR, `${code}${ext}`), buf); }
+  catch (e) {
+    await stagedFiles.deleteOne({ short_code: code }).catch(() => {});
+    console.error(`[${new Date().toISOString()}] [audio] stage write failed:`, e.message);
+    throw new Error('upload failed, try again later');
+  }
+  log(`staged ${code}${ext} size=${mb(buf.length)} (${filename})`);
+  setImmediate(() => maybeFlush().catch(e => console.error(`[${new Date().toISOString()}] [audio] flush error:`, e.message)));
+  return { short_url: `${SHORT_URL_BASE}${code}${ext}`, code, hf_url: null };
+}
+
+// pushes staged files to Hugging Face as one commit once BATCH_SIZE are waiting (or the oldest has waited BATCH_MAX_AGE_MS)
+let flushing = false;
+async function flushDue() {
+  const n = await stagedFiles.countDocuments();
+  if (!n) return false;
+  if (n >= BATCH_SIZE) return true;
+  const oldest = await stagedFiles.find().sort({ created_at: 1 }).limit(1).next();
+  return !!oldest && Date.now() - oldest.created_at.getTime() >= BATCH_MAX_AGE_MS;
+}
+async function maybeFlush() {
+  if (flushing) return;
+  flushing = true;
+  try {
+    while (await flushDue()) {
+      const batch = await stagedFiles.find().sort({ created_at: 1 }).limit(BATCH_SIZE).toArray();
+      if (!batch.length || !(await flushBatch(batch))) break;   // on failure leave everything staged, the 30s timer tries again
+    }
+  } finally { flushing = false; }
+}
+
+async function flushBatch(batch) {
+  const items = [];
+  for (const d of batch) {
+    try { items.push({ d, p: path.join(STAGE_DIR, d.file_name), buf: await fsp.readFile(path.join(STAGE_DIR, d.file_name)) }); }
+    catch { console.warn(`[${new Date().toISOString()}] [audio] staged file missing on disk, dropping ${d.file_name}`); await stagedFiles.deleteOne({ _id: d._id }).catch(() => {}); }
+  }
+  if (!items.length) return true;
+  const size = items.reduce((a, x) => a + x.buf.length, 0);
   const errors = [];
 
   for (const { username, token } of hfAccounts()) {
+    const skip = new Set();
+    for (let n = 0; n < 4; n++) {   // each retry moves to another dataset when the current one is commit-rate-limited
+    let repoName = null;
     try {
       const st = await hfStorage(username);
-      if (st.total_size + size > MAX_ACCOUNT_STORAGE) { errors.push(`${username}: full`); log(`hf ${username}: account full, trying next`); continue; }
+      if (st.total_size + size > MAX_ACCOUNT_STORAGE) { errors.push(`${username}: full`); log(`hf ${username}: account full, trying next`); break; }
 
-      // newest dataset, or a fresh one when it would pass 12GB
+      // newest usable dataset (room left, not rate-limited), else any other usable one, else a fresh one
+      const fits = d => d.size + size <= MAX_DATASET_SIZE && !skip.has(d.name) && !repoCooling(`${username}/${d.name}`);
       const last = st.datasets[st.datasets.length - 1];
-      let name = last && last.size + size <= MAX_DATASET_SIZE ? last.name : null;
+      let name = last && fits(last) ? last.name : (st.datasets.slice().reverse().find(fits)?.name || null);
       if (!name) {
         do name = `file-storage-${1000 + crypto.randomInt(9000)}`; while (st.datasets.some(d => d.name === name));
       }
-      const repoName = `${username}/${name}`;
-      log(`hf try ${repoName} file=${filename} size=${mb(size)}${last && last.name === name ? '' : ' (new dataset)'}`);
+      repoName = `${username}/${name}`;
+      log(`hf batch ${repoName} files=${items.length} size=${mb(size)}${last && last.name === name ? '' : ' (new dataset)'}`);
       await ensureDataset(repoName, token);
 
-      const code = await shortCode();
-      const dest = `${DEST_DIR}/${code}${ext}`;
-      await hub.uploadFile({
+      await hub.uploadFiles({
         repo: { type: 'dataset', name: repoName }, accessToken: token,
-        file: { path: dest, content: new Blob([buf], { type: mime || 'application/octet-stream' }) },
-        commitTitle: `Upload ${code}${ext}`,
+        files: items.map(x => ({ path: `${DEST_DIR}/${x.d.file_name}`, content: new Blob([x.buf], { type: x.d.mime || 'application/octet-stream' }) })),
+        commitTitle: `Upload ${items.length} file(s)`,
       });
 
-      const hf_url = `https://huggingface.co/datasets/${repoName}/resolve/main/${dest}`;
-      await hfFiles.insertOne({ short_code: code, file_name: `${code}${ext}`, original_path: filename, hf_url, dataset: name, size, uploader: username });
+      // record every file in the shared collection BEFORE removing the staged copy so the short link never 404s in between
+      const docs = items.map(x => ({ short_code: x.d.short_code, file_name: x.d.file_name, original_path: x.d.original_path, hf_url: `https://huggingface.co/datasets/${repoName}/resolve/main/${DEST_DIR}/${x.d.file_name}`, dataset: name, size: x.buf.length, uploader: username }));
+      await hfFiles.insertMany(docs, { ordered: false }).catch(e => { if (e.code !== 11000) throw e; });
 
-      // bump counters: existing dataset entry first, else push a new one
       const id = `account_storage_${username}`;
       const r = await hfSettings.updateOne({ _id: id, 'datasets.name': name }, { $inc: { 'datasets.$.size': size, total_size: size } });
       if (!r.matchedCount) await hfSettings.updateOne({ _id: id }, { $inc: { total_size: size }, $push: { datasets: { name, size } } });
 
-      log(`hf ok ${repoName}/${dest} total_used=${mb(st.total_size + size)}`);
-      return { short_url: SHORT_URL_BASE ? `${SHORT_URL_BASE}${code}${ext}` : hf_url, code, hf_url };
+      await stagedFiles.deleteMany({ _id: { $in: items.map(x => x.d._id) } });
+      await Promise.all(items.map(x => fsp.unlink(x.p).catch(() => {})));
+      log(`hf ok ${repoName} files=${items.length} total_used=${mb(st.total_size + size)}`);
+      return true;
     } catch (e) {
       errors.push(`${username}: ${e.message}`);
-      console.warn(`[${new Date().toISOString()}] [audio] hf FAILED ${username}: ${e.message}`);
+      console.warn(`[${new Date().toISOString()}] [audio] hf FAILED ${username}: ${String(e.message).slice(0, 200)}`);
+      if (repoName && /rate limit|\b429\b/i.test(e.message)) { repoCool(repoName, e.message); skip.add(repoName.split('/')[1]); continue; }
+      break;
+    }
     }
   }
-  console.error(`[${new Date().toISOString()}] [audio] upload failed on all Hugging Face accounts: ${errors.join('; ').slice(0, 500) || 'none configured'}`);
-  throw new Error('upload failed, try again later');   // full reason is in the log, not in the chat
+  console.error(`[${new Date().toISOString()}] [audio] batch upload failed, ${items.length} file(s) stay staged: ${errors.join('; ').slice(0, 500) || 'none configured'}`);
+  return false;
 }
 
 // reply that never throws but always logs why it failed; retries without reply_parameters (deleted msg / topic quirks)
@@ -1866,6 +1947,9 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   const db = client.db('naudio_bot');
   const udb = client.db(UPLOADER_DB);
   hfFiles = udb.collection('xfiles');
+  stagedFiles = db.collection('staged_files');
+  await stagedFiles.createIndex({ short_code: 1 }, { unique: true });
+  await stagedFiles.createIndex({ created_at: 1 });
   hfSettings = udb.collection('xsettings');
   await hfFiles.createIndex({ short_code: 1 }, { unique: true }).catch(e => console.warn('[hf] short_code index skipped:', e.message));
   if (!hfAccounts().length) console.warn('[hf] no Hugging Face accounts configured (HF_USERNAME/HF_TOKEN)');
@@ -1947,6 +2031,9 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
     }
   } catch (e) { console.warn(`[${new Date().toISOString()}] [audio] url migration failed:`, e.message); }
   startApi({ songs, users, queues });
+  log(`staging dir ${STAGE_DIR} batch=${BATCH_SIZE} max_age=${BATCH_MAX_AGE_MS / 60000}min`);
+  setInterval(() => maybeFlush().catch(e => console.error(`[${new Date().toISOString()}] [audio] flush error:`, e.message)), 30000);
+  maybeFlush().catch(() => {});
   pump();
   pumpImports();
   setInterval(async () => {   // safety net: wake due retries, rescue jobs stuck in "processing"
