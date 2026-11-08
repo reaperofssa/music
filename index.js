@@ -7,7 +7,8 @@ const express = require('express');
 const cors = require('cors');
 
 const { BOT_TOKEN, MONGO_URI, HF_TOKEN, HF_USERNAME, HF_BACKUP_ACCOUNTS = '' } = process.env;
-const SHORT_URL_BASE = (process.env.SHORT_URL_BASE ?? 'https://music-production-5aeb.up.railway.app').replace(/\/+$/, '') + '/'; // short-link prefix stored in mongo (song audio, covers, posters, profile images)
+const APP_URL = (process.env.APP_URL || 'https://music-production-5aeb.up.railway.app').replace(/\/+$/, ''); // public url of this service (mini app, short links)
+const SHORT_URL_BASE = (process.env.SHORT_URL_BASE ?? APP_URL).replace(/\/+$/, '') + '/'; // short-link prefix stored in mongo (song audio, covers, posters, profile images)
 const UPLOADER_DB = process.env.UPLOADER_DB || 'xcatbox_clone'; // same db the python uploader / short-url service uses
 const MAX_DATASET_SIZE = 12 * 1024 ** 3;   // 12GB per dataset
 const MAX_ACCOUNT_STORAGE = 150 * 1024 ** 3; // 150GB per account
@@ -203,7 +204,7 @@ function verifyInitData(raw, maxAge = INITDATA_MAX_AGE) {
 const cookieOf = (req, name) => (req.headers.cookie || '').split(';').map(c => c.trim().split(/=(.*)/s)).find(([k]) => k === name)?.[1];
 
 // ---------- api ----------
-const BASE = (process.env.BASE_URL || '').replace(/\/$/, '');
+const BASE = APP_URL;
 const PER_PAGE = 80;
 const HOT_LIMIT = 60;
 const MAX_CAPSULES = 50, MAX_CAPSULE_SONGS = 2000, GAP = 1024;
@@ -1246,7 +1247,28 @@ async function uploadToHost(buf, filename, mime) {
       console.warn(`[${new Date().toISOString()}] [audio] hf FAILED ${username}: ${e.message}`);
     }
   }
-  throw new Error(`upload failed on all Hugging Face accounts (${errors.join('; ') || 'none configured'})`);
+  // Hugging Face failed (429, full, no accounts...): fall back to catbox
+  log(`hf unavailable (${errors.join('; ').slice(0, 300) || 'none configured'}), falling back to catbox file=${filename}`);
+  try {
+    const url = await retry(() => uploadToCatbox(buf, filename, mime), 3, 2000);
+    log(`catbox ok ${url}`);
+    return { short_url: url, code: null, hf_url: null };
+  } catch (e) {
+    console.error(`[${new Date().toISOString()}] [audio] catbox FAILED:`, e.message);
+    throw new Error('upload failed, try again later');
+  }
+}
+
+// catbox.moe backup host (set CATBOX_USERHASH to tie uploads to an account, optional)
+async function uploadToCatbox(buf, filename, mime) {
+  const fd = new FormData();
+  fd.append('reqtype', 'fileupload');
+  if (process.env.CATBOX_USERHASH) fd.append('userhash', process.env.CATBOX_USERHASH);
+  fd.append('fileToUpload', new Blob([buf], { type: mime || 'application/octet-stream' }), filename);
+  const r = await fetch('https://catbox.moe/user/api.php', { method: 'POST', body: fd, signal: AbortSignal.timeout(180000) });
+  const t = (await r.text()).trim();
+  if (!r.ok || !/^https?:\/\//.test(t)) throw new Error(`catbox ${r.status}: ${t.slice(0, 200)}`);
+  return t;
 }
 
 // reply that never throws but always logs why it failed; retries without reply_parameters (deleted msg / topic quirks)
@@ -1902,7 +1924,7 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
   // one-time (idempotent) migration: point every stored short link (<host>/<6 chars>.<ext>) at SHORT_URL_BASE
   try {
     const esc = SHORT_URL_BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const oldLink = /^https?:\/\/(?!huggingface\.co\/)[^\/]+\/[a-z0-9]{6}\.[a-z0-9]+$/, isNew = new RegExp('^' + esc);
+    const oldLink = /^https?:\/\/(?!huggingface\.co\/|files\.catbox\.moe\/)[^\/]+\/[a-z0-9]{6}\.[a-z0-9]+$/, isNew = new RegExp('^' + esc);
     const rewrite = f => [{ $set: { [f]: { $concat: [SHORT_URL_BASE, { $arrayElemAt: [{ $split: ['$' + f, '/'] }, -1] }] } } }];
     for (const [col, f] of [[songs, 'upload_url'], [songs, 'cover_url'], [songs, 'poster_url'], [songs, 'image_url'], [users, 'theme.avatar'], [users, 'theme.bgImage']]) {
       const r = await col.updateMany({ $and: [{ [f]: oldLink }, { [f]: { $not: isNew } }] }, rewrite(f));
