@@ -2139,6 +2139,7 @@ const vcCmdDel = new Set(), vcAdminPlay = new Set(), vcLangMap = new Map(), vcAu
 let vcLogger = false, vcCmdCount = 0, vcBroadcasting = false;
 const vcMsg = new Map();      // chat -> { id, photo, text }: the message showing the current track
 const vcQueued = new Map();   // `${chat}:${trackId}` -> id of its "added to queue" message
+const vcDone = new Set();     // `${chat}:${message_id}` of messages already turned into a now-playing card; late status events skip them
 const vcPending = new Map();  // event token -> id of the "Hold on..." message
 
 const vcLangOf = async chat => VC_LANGS[vcLangMap.get(chat) || VC_LANG_DEFAULT] || VC_EN;
@@ -2302,7 +2303,7 @@ async function vcShowTrack(chat, track, mid, L, wantThumb) {
   let photo = null;
   if (wantThumb !== false && (await vcConfig()).thumb_gen) {
     photo = VC_DEFAULT_THUMB;
-    if (track.kind === 'yt') { const r = await vc.get('/thumb/' + track.id).catch(() => null); if (r?.buf) photo = { source: r.buf }; }
+    if (track.kind === 'yt') { const r = await vc.get('/thumb/' + track.id, 5000).catch(() => null); if (r?.buf) photo = { source: r.buf }; }
   }
   const tryIt = async f => { try { await f(); return true; } catch (e) { log(`vc show track: ${e.description || e.message}`); return false; } };
   let id = mid, isPhoto = false;
@@ -2326,6 +2327,7 @@ async function vcOnEvent(e) {
       else if (e.code === 'downloading') text = L.play_downloading;
       else if (e.code === 'dl_complete') text = vcFmt(L.dl_complete, e.args.elapsed);
       else if (e.code === 'dl_progress') { const a = e.args; text = vcFmt(L.dl_progress, vcSize(a.cur), vcSize(a.total), a.percent, vcSize(a.speed), vcEta(a.eta)); extra = kbCancel(L.cancel); }
+      if (vcDone.has(`${chat}:${e.message_id}`)) break;   // track already started, don't bring back "Downloading..."
       if (text) await ve(chat, e.message_id, text, extra).catch(() => {});
       break;
     }
@@ -2338,6 +2340,7 @@ async function vcOnEvent(e) {
     }
     case 'track_started': {
       const mid = e.message_id || vcPending.get(e.token); vcPending.delete(e.token);
+      if (mid) { vcDone.add(`${chat}:${mid}`); if (vcDone.size > 500) vcDone.delete(vcDone.values().next().value); }
       await vcShowTrack(chat, e.track, mid, L, e.thumb || e.track.kind !== 'yt');
       break;
     }
@@ -2362,6 +2365,13 @@ async function vcOnEvent(e) {
     }
   }
 }
+const vcChains = new Map();   // chat_id -> promise chain: events of one chat stay in order, different chats run in parallel
+function vcDispatch(e) {
+  const key = e.chat_id ?? 0, prev = vcChains.get(key) || Promise.resolve();
+  const next = prev.then(() => vcOnEvent(e)).catch(err => log(`vc event ${e.type} failed: ${err.description || err.message}`))
+    .finally(() => { if (vcChains.get(key) === next) vcChains.delete(key); });
+  vcChains.set(key, next);
+}
 async function vcPoll() {
   let cursor = -1, boot = null;
   for (;;) {
@@ -2370,7 +2380,7 @@ async function vcPoll() {
       if (!r.ok) throw new Error(r.error || 'events failed');
       if (cursor < 0) { cursor = r.last; boot = r.boot; continue; }
       if (r.boot !== boot) { boot = r.boot; cursor = 0; log('music server restarted'); continue; }
-      for (const e of r.events) { cursor = e.id; try { await vcOnEvent(e); } catch (err) { log(`vc event ${e.type} failed: ${err.description || err.message}`); } }
+      for (const e of r.events) { cursor = e.id; vcDispatch(e); }
     } catch (e) { cursor = cursor < 0 ? cursor : cursor; await sleep(3000); }
   }
 }
