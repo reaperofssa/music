@@ -1911,6 +1911,908 @@ bot.command('upload', async ctx => {
   catch (e) { console.error(`[${new Date().toISOString()}] [audio] /upload enqueue failed:`, e); await say(ctx, '⚠️ Could not queue this song, try again.', target.message_id); }
 });
 
+// =====================================================================================================
+// ---------- VC music (AviaxMusic port) ----------
+// Commands, permissions, settings and all message UI live here. Streaming, downloading, search and the
+// assistant accounts live in vc_server.py (VC_API_URL). The server pushes events (track started, next track
+// downloading, download progress, errors ...) which are long-polled from GET /events.
+// env: VC_API_URL, VC_API_KEY, OWNER_ID (default UPLOAD_ADMIN_ID), LOGGER_ID, SUPPORT_CHAT, SUPPORT_CHANNEL,
+//      SOURCE_URL, START_IMG, PING_IMG, DEFAULT_THUMB, LANG_CODE, VC_LOCALES_DIR (optional *.json from the original repo)
+// =====================================================================================================
+const vcUtil = require('util');
+const VC_URL = (process.env.VC_API_URL || '').replace(/\/+$/, '');
+const VC_KEY = process.env.VC_API_KEY || '';
+const VC_OWNER = Number(process.env.OWNER_ID || UPLOAD_ADMIN_ID);
+const VC_LOGGER = Number(process.env.LOGGER_ID || 0);
+const VC_SUPPORT_CHAT = process.env.SUPPORT_CHAT || 'https://t.me/DevilsHeavenMF';
+const VC_SUPPORT_CHANNEL = process.env.SUPPORT_CHANNEL || 'https://t.me/fallenx';
+const VC_SOURCE = process.env.SOURCE_URL || 'https://github.com/CyberPixelPro/AviaxMusic';
+const VC_START_IMG = process.env.START_IMG || 'https://files.catbox.moe/zvziwk.jpg';
+const VC_PING_IMG = process.env.PING_IMG || 'https://files.catbox.moe/haagg2.png';
+const VC_DEFAULT_THUMB = process.env.DEFAULT_THUMB || 'https://te.legra.ph/file/3e40a408286d4eda24191.jpg';
+const VC_LANG_DEFAULT = process.env.LANG_CODE || 'en';
+const VC_BOOT = Date.now();
+
+// ---------- strings (English built in; drop the original anony/locales/*.json next to this file in ./locales for the other languages) ----------
+const VC_EN = {
+  add_me: "Add me to your group",
+  admin_required: "Bot requires the <b>invite users via link</b> permission to work.",
+  admin_cache_wait: "You can only refresh the admin cache once every 10 minutes.",
+  admin_cache_reloading: "Reloading admin cache...",
+  admin_cache_reloaded: "Admin cache refreshed successfully!",
+  auth_added: "Added {0} to the authorized users list.",
+  auth_removed: "Removed {0} from the authorized users list.",
+  auth_empty: "Authorized users list is empty.",
+  auth_list: "<u><b>List of authorized users in {0}:</b></u>\n",
+  auth_is_admin: "The user is already an <b>admin</b> and can't be added to authorized users.",
+  auto_left: "I waited, I watched, I yawned... and then I left the video chat.",
+  bl_usage: "<b>Usage:</b>\n\n/{0} [chat_id|user_id]",
+  bl_invalid: "Only chat IDs and user IDs are supported.",
+  bl_already: "This chat is already blacklisted.",
+  bl_not: "This chat is not blacklisted.",
+  bl_added: "This chat has been blacklisted.",
+  bl_removed: "This chat has been removed from the blacklist.",
+  bl_user_notify: "You've been blacklisted from using this bot. Please reach out in the <a href=\"{0}\">support chat</a> for more info.",
+  dl_cancel: "Download canceled by {0}",
+  dl_complete: "Download completed. Processing file...\n\nTime elapsed: {0}s",
+  dl_cancelling: "Hang on, cancelling the download now!",
+  dl_active: "Already downloading that file. Mind waiting?",
+  dl_limit: "Failed to process the file. The maximum download limit is <b>200 MB</b>.",
+  dl_progress: "<u><b>Downloading file</b></u>\n\n<b>Progress:</b> {0} / {1} [{2:.1f}%]\n<b>Speed:</b> {3}/s | <b>ETA:</b> {4}",
+  dl_not_found: "Download already cancelled.",
+  error_no_audio: "Moving to the next track...\n\nAudio source not found in the file.",
+  error_no_call: "<b>No active video chat found.</b>\n\nPlease start one and <b>try again</b>.",
+  error_no_file: "Download failed.\n\nIf the issue persists, report it to the <a href=\"{0}\">support chat</a>",
+  error_tg_server: "<u><b>Telegram server error</b></u>\n\nTelegram is experiencing internal issues. Clearing the queue and leaving the video chat.",
+  error_rtmp: "RTMP streaming is not supported. Please stop the RTMP stream and start a video chat instead.",
+  eval_error: "⚠️ Error executing snippet\n\n",
+  eval_inp: "What?",
+  eval_out: "<b>Output:</b>\n<code>{0}</code>",
+  gcast_usage: "Reply to a message for broadcasting the message.",
+  gcast_active: "Please wait for the ongoing broadcast to finish.",
+  gcast_inactive: "Broadcasting is currently inactive.",
+  gcast_start: "Broadcasting started.",
+  gcast_stop: "Broadcast stopped.",
+  gcast_stopped: "Broadcasting stopped. (check log group)\n\nSent to {0} groups and {1} users.",
+  gcast_log: "<u><b>Broadcast Log</b></u>\n\n<b>User:</b> <code>{0}</code> | {1}\n<b>Command:</b> <code>{2}</code>\n\nUse /stop_gcast to stop the broadcast.",
+  gcast_stop_log: "Broadcast stopped by <code>{0}</code> | {1}",
+  gcast_end: "Broadcasted the message to {0} groups and {1} users.",
+  help_menu: "<b>Click the buttons below to get information about my commands.</b>\n\n<i><b>Note:</b> All commands can be used with /</i>",
+  help_admins: "<u><b>Admin commands:</b></u>\n\n/pause: Puase the ongoing stream.\n/resume: Resume the paused stream.\n/skip: Skip the current stream.\n/stop: Stop the ongoing stream.\n\n/seek [duration in seconds]: Seek the ongoing stream.\n/seekback [duration in seconds]: Seek the ongoing stream backward.\n\n/reload: Reloads the admin cache.",
+  help_auth: "<u><b>Auth commands:</b></u>\n<i>Authorized users can control the ongoing stream without being an admin.</i>\n\n/auth: Add a user to the authorized users list.\n/unauth: Remove a user from the authorized users list.",
+  help_blist: "<u><b>Blacklist commands:</b></u>\n<i>Blacklisted chats and users cannot use the bot.</i>\n\n/blacklist [chat_id|user_id]: Add a chat/user to the blacklist.\n/unblacklist [chat_id|user_id]: Remove a chat/user from the blacklist",
+  help_lang: "<u><b>Language commands:</b></u>\n<i>This bot supports multiple languages.</i>\n\n/lang: Change the language of the bot.",
+  help_ping: "<u><b>Ping commands:</b></u>\n\n/help: Shows the help menu of the bot.\n\n/ping: Check the ping and memory usage of the bot.\n\n/start: Start the bot.\n\n/sudolist: Shows the list of sudo users of the bot.",
+  help_play: "<u><b>Play commands:</b></u>\n<i>You can play music in the video chat using the following commands.</i>\n\n/play [song name/youtube url/reply to audio]: Play music in the video chat.\n/vplay [song name/youtube url/reply to video]: Play music video in the video chat.\n-f: Force play music in the video chat.\n-v: Plays music video in the video chat.\n\n<b>Example:</b> <code>/play -f -v attention</code>",
+  help_queue: "<u><b>Queue commands:</b></u>\n\n/queue: Shows the currently queued tracks in the queue.",
+  help_stats: "<u><b>Stats commands:</b></u>\n\n/stats: Shows the bot's stats.",
+  help_sudo: "<u><b>Sudo commands:</b></u>\n\n/ac: Shows the active calls count.\n\n/activevc: Shows the list of the active calls.\n\n/broadcast [reply to message]: Broadcasts the message to all the chats.\n-nochat: Excludes groups from the broadcast.\n-user: Include users in the broadcast.\n-copy: Removes the forwarded tag from the broadcast message.\n<b>Example:</b> <code>/broadcast -user -copy</code>\n\n/eval: Executes the given code.\n\n/logs: Sends the log file.\n\n/logger [on|off]: Enables/disables the logger.\n\n/restart: Restarts the bot.\n\n/addsudo: Add a user to the sudo users list.\n/rmsudo: Remove a user from the sudo users list.",
+  lang_choose: "Please choose the language you want to set for the current chat:",
+  lang_change: "Changing the language of the current chat to: {0}",
+  lang_changed: "The language of the current chat has been changed to: <i>{0}</i>",
+  lang_same: "The language of the current chat is already set to: {0}",
+  log_fetch: "Fetching logs...",
+  log_not_found: "Log file doesn't exist.",
+  log_sent: "Log file of {0}",
+  log_chat: "<u><b>New Chat Log</b></u>\n\n<b>Chat:</b> <code>{0}</code> | {1}\n<b>User:</b> <code>{2}</code> | {3}",
+  log_user: "<u><b>New User Log</b></u>\n\n<b>ID:</b> <code>{0}</code>\n<b>Name:</b> {1} | {2}",
+  logger_on: "Logger enabled.",
+  logger_off: "Logger disabled.",
+  logger_usage: "<b>Usage:</b>\n\n/{0} [on|off]",
+  loop_count: "The current loop count is: {0}",
+  loop_set: "Loop count set to: {0}",
+  loop_off: "Loop disabled.",
+  loop_usage: "<b>Usage:</b>\n\n<code>/loop [count]</code>\n<code>/loop off</code>",
+  not_playing: "The bot isn't streaming in the video chat.",
+  pinging: "Pinging… please wait…",
+  ping_pong: "<u><b>Pong!</b></u>\n\n<b>Latency:</b> <code>{0}ms</code>\n\n<b>Uptime:</b> {1}\n<b>CPU:</b> <code>{2}%</code>\n<b>RAM:</b> <code>{3}%</code>\n<b>Disk:</b> <code>{4}%</code>\n<b>PyTgCalls Latency:</b> <code>{5}ms</code>",
+  play_admin: "<u><b>Admin only play</b></u>\n\nOnly admins are allowed to play in this chat.",
+  play_banned: "<u><b>{0} assistant is banned your chat</b></u>\n\n<b>ID:</b> <code>{1}</code>\n<b>Name:</b> {2}\n<b>Username:</b> {3}",
+  play_media: "<u><b>| Started streaming</b></u>\n\n<b>Title:</b> <a href=\"{0}\">{1}</a>\n\n<b>Duration:</b> {2} min\n<b>Requested by:</b> {3}",
+  play_log: "<u>{0} Play Log</u>\n\n<b>Chat:</b> <code>{1}</code> | {2}\n<b>User:</b> <code>{3}</code> | {4}\n<b>Message link:</b> {5}\n\n<b>Title:</b> {6}\n<b>Duration:</b> {7} min",
+  play_queued: "<u><b>Added to queue: {0}</b></u>\n\n<b>Title:</b> <a href=\"{1}\">{2}</a>\n\n<b>Duration:</b> {3} min\n<b>Requested by:</b> {4}",
+  play_usage: "<b>Usage:</b>\n\n<code>/play attention</code>",
+  play_seeking: "Seeking the current stream...",
+  play_again: "Replaying the current media...",
+  play_now: "Play Now",
+  play_next: "Hold on...\n\nDownloading next media from the queue.",
+  play_invite: "Hold on a moment...\n\nInviting {0} assistant to your chat.",
+  play_searching: "Searching...",
+  play_downloading: "Downloading...",
+  play_paused: "<b>Stream paused by</b> {0}",
+  play_resumed: "<b>Stream resumed by</b> {0}",
+  play_replayed: "<b>Stream replayed by</b> {0}",
+  play_skipped: "<b>Stream skipped by</b> {0}",
+  play_stopped: "<b>Stream ended by</b> {0}",
+  play_seeked: "<b>Stream skipped {0} and started from {1} seconds by</b> {2}",
+  play_expired: "This button has expired.",
+  play_unsupported: "Live streams are not supported.",
+  play_already_paused: "Do you remember that you resumed the stream?",
+  play_not_paused: "Do you remember that you paused the stream?",
+  play_seek_usage: "<b>Usage:</b> /{0} duration\n<b>Example:</b> <code>/{0} 15</code>",
+  play_seek_no_dur: "Failed to fetch the duration of the ongoing stream.",
+  play_seek_min: "Minimum seek time is 10 seconds — try a bit longer!",
+  play_duration_limit: "Streams longer than {0} minutes are not allowed to play.",
+  play_queue_full: "The queue limit ({0}) has been reached. Please wait for the currently queued tracks to finish playing, then try again.",
+  play_invite_error: "Failed to invite assistant to the chat.\n\nReason: <code>{0}</code>",
+  play_not_found: "Failed to process the query.\n\nIf the issue persists, report it to the <a href=\"{0}\">support chat</a>.",
+  play_chat_invalid: "This bot can only be used in <b>supergroups</b>.\n\nTo convert your group to a supergroup, make the chat history <b>visible</b> once.\n\nLeaving this chat...",
+  play_user_invalid: "You're an anonymous admin.\n\nRevert back to user account.",
+  playlist_fetch: "Fetching the playlist...\n\nPlease hold on.",
+  playlist_error: "Something went wrong while fetching the playlist.",
+  playlist_queued: "<u><b>Added {0} tracks from the playlist to queue:</b></u>\n\n",
+  queue_curr: "<u><b>Currently playing:</b></u>\n\n<b>Title:</b> <a href=\"{0}\">{1}</a>\n<b>Duration:</b> {2}\n<b>Requested by:</b> {3}\n\n",
+  queue_item: "<b>{0}. Title:</b> {1}\n     - {2} min\n\n",
+  queue_fetching: "Fetching queue...",
+  restarting: "Restarting...",
+  restarted: "Restart in progress. Don't worry, it'll only take a few seconds… maybe.",
+  start_pm: "Hey {0},\nThis is {1} !\n\nA music player bot with some awesome and useful features.\n\n<b><i>Click on the help button for more info.</i></b>",
+  start_gp: "Hey,\nThis is {0}\n\n<u><b>A music player bot with some awesome and useful features.</b></u>",
+  start_settings: "<u><b>{0} settings</b></u>\n\nClick the buttons below to change this chat's current settings.",
+  stats_fetching: "Fetching stats...",
+  stats_sudo: "\n\n<b>Modules:</b> {0}\n<b>Platform:</b> {1}\n<b>Ram usage:</b> <code>{2}MB | {3}GB</code>\n<b>CPU usage:</b> <code>{4}% ({5} cores)</code>\n<b>Storage:</b> <code>{6}GB | {7}GB</code>\n\n<b>Python:</b> <code>v{8}</code>\n<b>Pyrogram:</b> <code>v{9}</code>\n<b>PyTgCalls:</b> <code>v{10}</code>",
+  stats_user: "<u><b>{0} stats</b></u>\n\n<b>Assistants:</b> {1}\n<b>Auto leave:</b> {2}\n\n<b>Blocked chats:</b> {3}\n<b>Blocked users:</b> {4}\n<b>Sudo users:</b> {5}\n\n<b>Served chats:</b> {6}\n<b>Served users:</b> {7}",
+  sudo_already: "{0} is already an sudo user.",
+  sudo_added: "Added {0} to the sudo users list.",
+  sudo_not: "{0} is not an sudo user.",
+  sudo_removed: "Removed {0} from the sudo users list.",
+  sudo_fetching: "Fetching sudo users list...",
+  sudo_owner: "<u><b>Owner:</b></u>\n- {0}\n\n",
+  sudo_users: "<u><b>Sudo users:</b></u>",
+  user_not_admin: "Oh sure, go ahead and manage the video chat... oh wait, you're not an admin.",
+  user_no_perms: "You? Manage the video chat? Not with those permissions, sweetie.",
+  user_not_found: "I'll need a user ID — or would you mind replying to someone's message?",
+  vc_empty: "Looks like there aren't any active streams on the bot.",
+  vc_count: "Active streams on the bot: <b>{0}</b>",
+  vc_fetching: "Fetching list of active streams...",
+  vc_list: "<u><b>List of active streams:</b></u>",
+  back: "Back",
+  backward: "backward",
+  cancel: "Cancel",
+  channel: "Channel",
+  close: "Close",
+  forward: "forward",
+  help: "Help",
+  language: "Language",
+  paused: "Stream paused",
+  cmd_delete: "Command delete",
+  play_mode: "Admin only play",
+  playing: "Playing",
+  processing: "Processing...",
+  replayed: "Stream replayed",
+  skipped: "Stream skipped",
+  stopped: "Stream ended",
+  source: "Source",
+  support: "Support",
+  help_0: "Admins",
+  help_1: "Auth",
+  help_2: "Blacklist",
+  help_3: "Language",
+  help_4: "Ping",
+  help_5: "Play",
+  help_6: "Queue",
+  help_7: "Stats",
+  help_8: "Sudoers",
+};
+Object.assign(VC_EN, {
+  vc_down: '⚠️ The music server is unreachable, try again in a moment.',
+  no_assistant: '⚠️ No assistant account is configured on the music server.',
+  vc_error: '⚠️ Something went wrong on the music server.',
+});
+const VC_LANG_NAMES = { ar: 'العربية', de: 'Deutsch', en: 'English', es: 'Español', fr: 'Français', hi: 'हिन्दी', ja: '日本語', my: 'မြန်မာဘာသာ', pa: 'ਪੰਜਾਬੀ', pt: 'Português', ru: 'Русский', tr: 'Türkçe', zh: '中文' };
+const VC_LANGS = { en: VC_EN };
+try {
+  const dir = process.env.VC_LOCALES_DIR || path.join(__dirname, 'locales');
+  for (const f of fs.readdirSync(dir)) if (f.endsWith('.json')) VC_LANGS[f.slice(0, -5)] = { ...VC_EN, ...JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8').replace(/^\uFEFF/, '')) };
+} catch {}
+const vcFmt = (s, ...a) => String(s).replace(/\{(\d+)(?::\.(\d)f)?\}/g, (_, i, p) => a[i] === undefined ? '' : p !== undefined ? Number(a[i]).toFixed(p) : a[i]);
+const vcEsc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const vcPlain = s => String(s).replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+const vcMention = u => `<a href="tg://user?id=${u.id}">${vcEsc(u.first_name || u.title || u.id)}</a>`;
+const vcBotName = () => bot.botInfo?.first_name || 'Music Bot';
+const vcSize = n => n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(2)} GB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(2)} MB` : `${(n / 1024).toFixed(2)} KB`;
+const vcEta = s => s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} min` : `${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')} h`;
+const vcMmss = s => new Date(Math.max(0, s) * 1000).toISOString().slice(14, 19);
+const vcUptime = s => { const d = Math.floor(s / 86400), h = Math.floor(s / 3600) % 24, m = Math.floor(s / 60) % 60; return `${d ? d + 'days, ' : ''}${h}h:${m}m:${s % 60}s`; };
+
+// ---------- music server api ----------
+async function vcApi(method, p, body, ms = 30000) {
+  if (!VC_URL) throw Object.assign(new Error('VC_API_URL is not set'), { vcDown: true });
+  let r;
+  try { r = await fetch(VC_URL + p, { method, headers: { 'Content-Type': 'application/json', 'X-Api-Key': VC_KEY }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(ms) }); }
+  catch (e) { throw Object.assign(new Error(`music server unreachable: ${e.message}`), { vcDown: true }); }
+  if (r.status === 401) throw Object.assign(new Error('music server rejected VC_API_KEY'), { vcDown: true });
+  if (!(r.headers.get('content-type') || '').includes('json')) return { ok: r.ok, buf: Buffer.from(await r.arrayBuffer()) };   // thumbnails / log file
+  return r.json().catch(() => ({ ok: false, error: 'vc_error' }));
+}
+const vc = { get: (p, ms) => vcApi('GET', p, null, ms), post: (p, b, ms) => vcApi('POST', p, b || {}, ms) };
+let vcCfgCache = null, vcCfgAt = 0;
+async function vcConfig() {
+  if (!vcCfgCache || Date.now() - vcCfgAt > 60000) { try { vcCfgCache = await vc.get('/config'); vcCfgAt = Date.now(); } catch {} }
+  return vcCfgCache || { thumb_gen: true, video_play: true, duration_limit: 60 };
+}
+
+// ---------- state (mongo collections vc_*, cached in memory) ----------
+let vcChatsC, vcUsersC, vcAuthC, vcLangC, vcCacheC;
+const vcChats = new Set(), vcUsers = new Set(), vcSudo = new Set([VC_OWNER]), vcBlUsers = new Set(), vcBlChats = new Set();
+const vcCmdDel = new Set(), vcAdminPlay = new Set(), vcLangMap = new Map(), vcAuth = new Map(), vcAdmins = new Map(), vcNotified = new Set();
+let vcLogger = false, vcCmdCount = 0, vcBroadcasting = false;
+const vcMsg = new Map();      // chat -> { id, photo, text }: the message showing the current track
+const vcQueued = new Map();   // `${chat}:${trackId}` -> id of its "added to queue" message
+const vcPending = new Map();  // event token -> id of the "Hold on..." message
+
+const vcLangOf = async chat => VC_LANGS[vcLangMap.get(chat) || VC_LANG_DEFAULT] || VC_EN;
+const vcFlag = async (chat, field, set, on) => { on ? set.add(chat) : set.delete(chat); await vcChatsC.updateOne({ _id: chat }, { $set: { [field]: on } }, { upsert: true }); };
+const vcAddChat = async chat => { if (!vcChats.has(chat)) { vcChats.add(chat); await vcChatsC.updateOne({ _id: chat }, { $setOnInsert: { _id: chat } }, { upsert: true }); } };
+const vcAddUser = async uid => { if (!vcUsers.has(uid)) { vcUsers.add(uid); await vcUsersC.updateOne({ _id: uid }, { $setOnInsert: { _id: uid } }, { upsert: true }); } };
+const vcIsAuth = async (chat, uid) => {
+  if (!vcAuth.has(chat)) vcAuth.set(chat, new Set((await vcAuthC.findOne({ _id: chat }))?.user_ids || []));
+  return vcAuth.get(chat).has(uid);
+};
+async function vcGetAdmins(chat, reload = false) {
+  if (!vcAdmins.has(chat) || reload) {
+    try { vcAdmins.set(chat, new Set((await bot.telegram.getChatAdministrators(chat)).filter(a => !a.user.is_bot).map(a => a.user.id))); }
+    catch { vcAdmins.set(chat, new Set()); }
+  }
+  return vcAdmins.get(chat);
+}
+async function vcIsAdmin(chat, uid) {
+  if ((await vcGetAdmins(chat)).has(uid)) return true;
+  try { return ['administrator', 'creator'].includes((await bot.telegram.getChatMember(chat, uid)).status); } catch { return false; }
+}
+const vcSetBl = async (id, on) => {
+  const chat = String(id).startsWith('-'), set = chat ? vcBlChats : vcBlUsers, key = chat ? 'bl_chats' : 'bl_users', f = chat ? 'chat_ids' : 'user_ids';
+  on ? set.add(id) : set.delete(id);
+  await vcCacheC.updateOne({ _id: key }, on ? { $addToSet: { [f]: id } } : { $pull: { [f]: id } }, { upsert: true });
+};
+
+// ---------- reply / edit helpers (HTML, with a plain-text retry when Telegram rejects the markup) ----------
+const vcH = { parse_mode: 'HTML', link_preview_options: { is_disabled: true } };
+const vcParseErr = e => /parse entities|can't parse/i.test(e?.description || e?.message || '');
+const vcQuote = ctx => ctx.chat.type !== 'private' && ctx.message ? { reply_parameters: { message_id: ctx.message.message_id, allow_sending_without_reply: true } } : {};
+async function vr(ctx, text, extra = {}) {
+  const ex = { ...vcH, ...vcQuote(ctx), ...extra };
+  try { return await ctx.reply(text, ex); }
+  catch (e) { if (vcParseErr(e)) return ctx.reply(vcPlain(text), { ...ex, parse_mode: undefined }); throw e; }
+}
+async function ve(chat, mid, text, extra = {}, photo = false) {
+  const go = (t, ex) => photo ? bot.telegram.editMessageCaption(chat, mid, undefined, t, ex) : bot.telegram.editMessageText(chat, mid, undefined, t, ex);
+  try { return await go(text, { ...vcH, ...extra }); }
+  catch (e) {
+    if (/not modified/i.test(e.description || '')) return;
+    if (vcParseErr(e)) return go(vcPlain(text), { ...extra, parse_mode: undefined, link_preview_options: { is_disabled: true } });
+    throw e;
+  }
+}
+const vcDel = (chat, mid) => mid ? bot.telegram.deleteMessage(chat, mid).catch(() => {}) : null;
+const vcSay = (chat, text, extra = {}) => bot.telegram.sendMessage(chat, text, { ...vcH, ...extra }).catch(e => { log(`vc send failed chat=${chat}: ${e.description || e.message}`); return null; });
+const vcLog = text => VC_LOGGER ? vcSay(VC_LOGGER, text) : null;
+function vcErr(e, ctx) {
+  const d = e.description || e.message || String(e);
+  if (e.vcDown) { const L = VC_EN; return (ctx?.callbackQuery ? ctx.answerCbQuery(L.vc_down, { show_alert: true }) : ctx?.reply?.(L.vc_down)).catch?.(() => {}); }
+  if (/not modified|message to edit not found|message can't be edited|query is too old|query ID is invalid|chat not found|bot was kicked|bot was blocked|not enough rights to send|have no rights to send|forbidden/i.test(d)) return log(`vc ignored: ${d}`);
+  console.error(`[${new Date().toISOString()}] [vc] handler error:`, e);
+}
+
+// ---------- keyboards ----------
+const ik = rows => ({ reply_markup: { inline_keyboard: rows } });
+const kb = (text, data) => ({ text: String(text), callback_data: data });
+const kbu = (text, url) => ({ text: String(text), url });
+const kbControls = (chat, { status, timer, remove } = {}) => {
+  const rows = [];
+  if (status) rows.push([kb(status, `controls status ${chat}`)]); else if (timer) rows.push([kb(timer, `controls status ${chat}`)]);
+  if (!remove) rows.push([kb('▷', `controls resume ${chat}`), kb('II', `controls pause ${chat}`), kb('⥁', `controls replay ${chat}`), kb('‣‣I', `controls skip ${chat}`), kb('▢', `controls stop ${chat}`)]);
+  return ik(rows);
+};
+const kbQueued = (chat, id, text) => ik([[kb(text, `controls force ${chat} ${id}`)]]);
+const kbQueue = (chat, text, playing) => ik([[kb(text, `controls ${playing ? 'pause' : 'resume'} ${chat} q`)]]);
+const kbCancel = text => ik([[kb(text, 'cancel_dl')]]);
+const kbHelp = (L, back = false) => {
+  if (back) return ik([[kb(L.back, 'help back'), kb(L.close, 'help close')]]);
+  const btns = ['admins', 'auth', 'blist', 'lang', 'ping', 'play', 'queue', 'stats', 'sudo'].map((c, i) => kb(L[`help_${i}`], `help ${c}`));
+  return ik([btns.slice(0, 3), btns.slice(3, 6), btns.slice(6)]);
+};
+const kbLang = cur => {
+  const b = Object.keys(VC_LANGS).sort().map(c => kb(`${VC_LANG_NAMES[c] || c} (${c}) ${c === cur ? '✔️' : ''}`, `lang_change ${c}`));
+  return ik(b.reduce((r, x, i) => (i % 2 ? r[r.length - 1].push(x) : r.push([x]), r), []));
+};
+const kbSettings = (L, adminOnly, cmdDel, lang) => ik([
+  [kb(L.play_mode + ' ➜', 'settings'), kb(adminOnly ? '✅' : '❌', 'settings play')],
+  [kb(L.cmd_delete + ' ➜', 'settings'), kb(cmdDel ? '✅' : '❌', 'settings delete')],
+  [kb(L.language + ' ➜', 'settings'), kb(VC_LANG_NAMES[lang] || lang, 'language')],
+]);
+const kbStart = (L, priv) => ik([
+  [kbu(L.add_me, `https://t.me/${bot.botInfo?.username}?startgroup=true`)],
+  [kb(L.help, 'help')],
+  [kbu(L.support, VC_SUPPORT_CHAT), kbu(L.channel, VC_SUPPORT_CHANNEL)],
+  priv ? [kbu(L.source, VC_SOURCE)] : [kb(L.language, 'language')],
+]);
+const kbYt = link => ik([[{ text: '❐', copy_text: { text: link } }, kbu('Youtube', link)]]);
+
+// ---------- command / callback wrappers ----------
+// o: { group, private, sudo, owner, allowBl, play }.  Blacklisted users are ignored, blacklisted chats are left.
+function vcCmd(names, fn, o = {}) {
+  vcCmdCount++;
+  bot.command(names, async ctx => {
+    try {
+      const chat = ctx.chat, from = ctx.from, grp = chat.type === 'group' || chat.type === 'supergroup';
+      if (o.group && !grp) return;
+      if (o.private && chat.type !== 'private') return;
+      if (!from || ctx.message.sender_chat || from.id === 1087968824) { if (o.play) await vr(ctx, (await vcLangOf(chat.id)).play_user_invalid); return; }   // anonymous admin / channel identity
+      if (vcBlChats.has(chat.id)) return bot.telegram.leaveChat(chat.id).catch(() => {});
+      if (vcBlUsers.has(from.id) && !o.allowBl) return;
+      if (o.sudo && !vcSudo.has(from.id)) return;
+      if (o.owner && from.id !== VC_OWNER) return;
+      await fn(ctx, await vcLangOf(chat.id));
+    } catch (e) { vcErr(e, ctx); }
+  });
+}
+function vcAct(re, fn) {
+  bot.action(re, async ctx => {
+    try {
+      const msg = ctx.callbackQuery.message;
+      if (!msg || vcBlUsers.has(ctx.from.id)) return;
+      if (vcBlChats.has(msg.chat.id)) return bot.telegram.leaveChat(msg.chat.id).catch(() => {});
+      await fn(ctx, await vcLangOf(msg.chat.id), msg.chat.id, msg);
+    } catch (e) { vcErr(e, ctx); }
+  });
+}
+const vcCan = async (chat, uid) => vcSudo.has(uid) || await vcIsAuth(chat, uid) || await vcIsAdmin(chat, uid);
+async function vcDeny(ctx, L) { return ctx.callbackQuery ? ctx.answerCbQuery(L.user_no_perms, { show_alert: true }).catch(() => {}) : vr(ctx, L.user_no_perms); }
+const vcCanManage = async (ctx, L) => { if (await vcCan(ctx.chat.id, ctx.from.id)) return true; await vcDeny(ctx, L); return false; };
+const vcAdminOnly = async (ctx, L) => {
+  const chat = ctx.chat || ctx.callbackQuery?.message?.chat;
+  if (chat.type === 'private' || vcSudo.has(ctx.from.id) || (await vcGetAdmins(chat.id)).has(ctx.from.id)) return true;
+  await vcDeny(ctx, L); return false;
+};
+const vcArgs = ctx => (ctx.message.text || '').split(/\s+/).slice(1);
+const vcCmdName = ctx => ((ctx.message.text || '').match(/^\/(\w+)/) || [])[1]?.toLowerCase();
+const vcApiErr = (L, code, x = {}) => ({
+  no_file: vcFmt(L.error_no_file, VC_SUPPORT_CHAT), no_call: L.error_no_call, no_audio: L.error_no_audio, tg_server: L.error_tg_server, rtmp: L.error_rtmp,
+  not_found: vcFmt(L.play_not_found, VC_SUPPORT_CHAT), usage: L.play_usage, duration_limit: vcFmt(L.play_duration_limit, x.limit), queue_full: vcFmt(L.play_queue_full, x.limit),
+  playlist_error: L.playlist_error, dl_limit: L.dl_limit, dl_active: L.dl_active, not_playing: L.not_playing, already_paused: L.play_already_paused, not_paused: L.play_not_paused,
+  no_assistant: L.no_assistant, expired: L.play_expired,
+}[code] || `${L.vc_error}\n<code>${vcEsc(code)}</code>`);
+
+async function vcExtractUser(ctx) {
+  const m = ctx.message, rep = m.reply_to_message;
+  if (rep?.from && !rep.forum_topic_created) return { id: rep.from.id, mention: vcMention(rep.from) };
+  const ent = (m.entities || []).find(e => e.type === 'text_mention' && e.user);
+  if (ent) return { id: ent.user.id, mention: vcMention(ent.user) };
+  const rest = (m.text || '').replace(/^\/\w+(@\w+)?/, ''), q = rest.match(/@(\w{5,32})/)?.[0] || rest.match(/\b\d{6,15}\b/)?.[0];
+  if (q) { const r = await vc.get('/user?q=' + encodeURIComponent(q)).catch(() => null); if (r?.ok) return { id: r.id, mention: r.mention }; }
+  return null;
+}
+const vcUserMention = async id => { const r = await vc.get('/user?q=' + id).catch(() => null); return r?.ok ? r.mention : `<a href="tg://user?id=${id}">${id}</a>`; };
+function vcGetUrl(m) {
+  let link = null;
+  for (const msg of [m, m.reply_to_message].filter(Boolean)) {
+    const text = msg.text || msg.caption || '';
+    for (const e of msg.entities || msg.caption_entities || []) {
+      if (e.type === 'text_link') { link = e.url; break; }
+      if (e.type === 'url') { link = text.substr(e.offset, e.length); break; }
+    }
+  }
+  return link ? link.split('&si')[0].split('?si')[0] : null;
+}
+
+// ---------- showing a track (edits the status / "Hold on" message into the now-playing card) ----------
+async function vcShowTrack(chat, track, mid, L, wantThumb) {
+  const text = vcFmt(L.play_media, track.url, vcEsc(track.title), track.duration, track.user), keyboard = kbControls(chat);
+  let photo = null;
+  if (wantThumb !== false && (await vcConfig()).thumb_gen) {
+    photo = VC_DEFAULT_THUMB;
+    if (track.kind === 'yt') { const r = await vc.get('/thumb/' + track.id).catch(() => null); if (r?.buf) photo = { source: r.buf }; }
+  }
+  const tryIt = async f => { try { await f(); return true; } catch (e) { log(`vc show track: ${e.description || e.message}`); return false; } };
+  let id = mid, isPhoto = false;
+  if (mid && photo && await tryIt(() => bot.telegram.editMessageMedia(chat, mid, undefined, { type: 'photo', media: photo, caption: text, parse_mode: 'HTML' }, keyboard))) isPhoto = true;
+  else if (mid && await tryIt(() => ve(chat, mid, text, keyboard))) { /* edited as text */ }
+  else {
+    let m = photo ? await bot.telegram.sendPhoto(chat, photo, { caption: text, ...vcH, ...keyboard }).catch(() => null) : null;
+    if (m) isPhoto = true; else m = await vcSay(chat, text, keyboard);
+    id = m?.message_id;
+  }
+  if (id) vcMsg.set(chat, { id, photo: isPhoto, text });
+}
+
+// ---------- events from the music server ----------
+async function vcOnEvent(e) {
+  const chat = e.chat_id, L = await vcLangOf(chat);
+  switch (e.type) {
+    case 'status': {
+      let text, extra = {};
+      if (e.code === 'playlist_fetch') text = L.playlist_fetch;
+      else if (e.code === 'downloading') text = L.play_downloading;
+      else if (e.code === 'dl_complete') text = vcFmt(L.dl_complete, e.args.elapsed);
+      else if (e.code === 'dl_progress') { const a = e.args; text = vcFmt(L.dl_progress, vcSize(a.cur), vcSize(a.total), a.percent, vcSize(a.speed), vcEta(a.eta)); extra = kbCancel(L.cancel); }
+      if (text) await ve(chat, e.message_id, text, extra).catch(() => {});
+      break;
+    }
+    case 'next_downloading': {
+      if (e.kind === 'force') { vcDel(chat, vcMsg.get(chat)?.id); vcMsg.delete(chat); }
+      if (e.kind !== 'replay') { vcDel(chat, vcQueued.get(`${chat}:${e.track_id}`)); vcQueued.delete(`${chat}:${e.track_id}`); }
+      const m = await vcSay(chat, e.kind === 'replay' ? L.play_again : L.play_next);
+      if (m) vcPending.set(e.token, m.message_id);
+      break;
+    }
+    case 'track_started': {
+      const mid = e.message_id || vcPending.get(e.token); vcPending.delete(e.token);
+      await vcShowTrack(chat, e.track, mid, L, e.thumb || e.track.kind !== 'yt');
+      break;
+    }
+    case 'track_error': {
+      const mid = e.message_id || vcPending.get(e.token); vcPending.delete(e.token);
+      const text = vcApiErr(L, e.code);
+      if (mid) await ve(chat, mid, text).catch(() => vcSay(chat, text)); else await vcSay(chat, text);
+      break;
+    }
+    case 'auto_left': {
+      const cur = vcMsg.get(chat);
+      if (cur) {
+        await bot.telegram.editMessageReplyMarkup(chat, cur.id, undefined, kbControls(chat, { status: L.stopped, remove: true }).reply_markup).catch(() => {});
+        await vcSay(chat, L.auto_left, { reply_parameters: { message_id: cur.id, allow_sending_without_reply: true } });
+      }
+      break;
+    }
+    case 'stopped': {
+      vcMsg.delete(chat);
+      for (const k of [...vcQueued.keys()]) if (k.startsWith(chat + ':')) vcQueued.delete(k);
+      break;
+    }
+  }
+}
+async function vcPoll() {
+  let cursor = -1, boot = null;
+  for (;;) {
+    try {
+      const r = await vc.get(`/events?after=${cursor}&timeout=25`, 40000);
+      if (!r.ok) throw new Error(r.error || 'events failed');
+      if (cursor < 0) { cursor = r.last; boot = r.boot; continue; }
+      if (r.boot !== boot) { boot = r.boot; cursor = 0; log('music server restarted'); continue; }
+      for (const e of r.events) { cursor = e.id; try { await vcOnEvent(e); } catch (err) { log(`vc event ${e.type} failed: ${err.description || err.message}`); } }
+    } catch (e) { cursor = cursor < 0 ? cursor : cursor; await sleep(3000); }
+  }
+}
+// moving "—◉—" timer under the now-playing card (every 7s, like the original), controls disappear in the last 10s
+async function vcTimer() {
+  const cfg = await vcConfig(), length = 10;
+  let act; try { act = (await vc.get('/active')).active || []; } catch { return; }
+  for (const a of act) {
+    const cur = vcMsg.get(a.chat_id);
+    if (!a.playing || !cur || !a.duration_sec || !a.time) continue;
+    const played = a.time, remaining = a.duration_sec - played, pos = Math.min(Math.floor(played / a.duration_sec * length), length - 1);
+    let timer = '—'.repeat(pos) + '◉' + '—'.repeat(length - pos - 1), remove = false;
+    if (remaining < 10) remove = true;
+    else timer = cfg.thumb_gen ? `${vcMmss(played)} | ${timer} | -${vcMmss(remaining)}` : null;
+    if (!timer && !remove) continue;
+    await bot.telegram.editMessageReplyMarkup(a.chat_id, cur.id, undefined, kbControls(a.chat_id, { timer, remove }).reply_markup).catch(() => {});
+  }
+}
+
+// =====================================================================================================
+// commands
+// =====================================================================================================
+vcCmd('help', async (ctx, L) => vr(ctx, L.help_menu, kbHelp(L)), { private: true });
+
+vcCmd('start', async (ctx, L) => {
+  if (vcBlUsers.has(ctx.from.id)) { if (!vcNotified.has(ctx.from.id)) { vcNotified.add(ctx.from.id); await vr(ctx, vcFmt(L.bl_user_notify, VC_SUPPORT_CHAT)); } return; }
+  if (vcArgs(ctx)[0] === 'help' && ctx.chat.type === 'private') return vr(ctx, L.help_menu, kbHelp(L));
+  const priv = ctx.chat.type === 'private';
+  const caption = priv ? vcFmt(L.start_pm, vcEsc(ctx.from.first_name), vcBotName()) : vcFmt(L.start_gp, vcBotName());
+  await ctx.replyWithPhoto(VC_START_IMG, { caption, ...vcH, ...kbStart(L, priv), ...(priv ? {} : vcQuote(ctx)) })
+    .catch(() => vr(ctx, caption, kbStart(L, priv)));
+  if (priv) { if (!vcUsers.has(ctx.from.id)) { await vcLog(vcFmt(L.log_user, ctx.from.id, '@' + (ctx.from.username || ''), vcMention(ctx.from))); await vcAddUser(ctx.from.id); } }
+  else if (!vcChats.has(ctx.chat.id)) { await vcLog(vcFmt(L.log_chat, ctx.chat.id, vcEsc(ctx.chat.title), ctx.from.id, vcMention(ctx.from))); await vcAddChat(ctx.chat.id); }
+}, { allowBl: true });
+
+vcCmd(['playmode', 'settings'], async (ctx, L) => vr(ctx, vcFmt(L.start_settings, vcEsc(ctx.chat.title)),
+  kbSettings(L, vcAdminPlay.has(ctx.chat.id), vcCmdDel.has(ctx.chat.id), vcLangMap.get(ctx.chat.id) || VC_LANG_DEFAULT)), { group: true });
+
+vcCmd(['ping', 'alive'], async (ctx, L) => {
+  const t0 = Date.now(), sent = await vr(ctx, L.pinging), latency = (Date.now() - t0).toFixed(2);
+  const st = await vc.get('/stats').catch(() => ({}));
+  const caption = vcFmt(L.ping_pong, latency, vcUptime(Math.floor((Date.now() - VC_BOOT) / 1000)), st.cpu ?? '?', st.ram ?? '?', st.disk ?? '?', st.ping ?? '?');
+  await bot.telegram.editMessageMedia(ctx.chat.id, sent.message_id, undefined, { type: 'photo', media: VC_PING_IMG, caption, parse_mode: 'HTML' }, ik([[kbu(L.support, VC_SUPPORT_CHAT)]]))
+    .catch(() => ve(ctx.chat.id, sent.message_id, caption, ik([[kbu(L.support, VC_SUPPORT_CHAT)]])));
+});
+
+vcCmd('stats', async (ctx, L) => {
+  const sent = await ctx.replyWithPhoto(VC_PING_IMG, { caption: L.stats_fetching, ...vcQuote(ctx) }).catch(() => vr(ctx, L.stats_fetching));
+  const st = await vc.get('/stats').catch(() => ({}));
+  let text = vcFmt(L.stats_user, vcBotName(), st.assistants ?? '?', !!st.auto_leave, vcBlChats.size, vcBlUsers.size, vcSudo.size, vcChats.size, vcUsers.size);
+  if (vcSudo.has(ctx.from.id)) text += vcFmt(L.stats_sudo, vcCmdCount, st.platform, st.rss_mb, st.total_ram_gb, st.proc_cpu, st.cores, st.disk_used_gb, st.disk_total_gb, st.python, st.pyrogram, st.pytgcalls);
+  await ve(ctx.chat.id, sent.message_id, text, {}, !!sent.photo).catch(() => vr(ctx, text));
+}, { group: true });
+
+// ---------- /play /vplay /playforce /vplayforce ----------
+async function vcAssistantReady(ctx, L, a) {
+  const chat = ctx.chat;
+  let member; try { member = await bot.telegram.getChatMember(chat.id, a.id); } catch { member = { status: 'left' }; }
+  const banned = () => vr(ctx, vcFmt(L.play_banned, vcBotName(), a.id, a.mention, a.username ? '@' + a.username : 'None'));
+  if (member.status === 'kicked') { try { await bot.telegram.unbanChatMember(chat.id, a.id, { only_if_banned: true }); } catch { await banned(); return false; } member = { status: 'left' }; }
+  else if (member.status === 'restricted') {
+    try { await bot.telegram.restrictChatMember(chat.id, a.id, { permissions: { can_send_messages: true, can_send_audios: true, can_send_documents: true, can_send_photos: true, can_send_videos: true, can_send_video_notes: true, can_send_voice_notes: true, can_send_polls: true, can_send_other_messages: true, can_add_web_page_previews: true, can_invite_users: true } }); }
+    catch { await banned(); return false; }
+  }
+  if (member.status !== 'left' && !(member.status === 'restricted' && !member.is_member)) return true;
+  let link;
+  if (chat.username) link = chat.username;
+  else {
+    try { link = (await bot.telegram.getChat(chat.id)).invite_link || await bot.telegram.exportChatInviteLink(chat.id); }
+    catch (e) { await vr(ctx, /rights|admin/i.test(e.description || '') ? L.admin_required : vcFmt(L.play_invite_error, e.name || 'Error')); return false; }
+  }
+  const umm = await vr(ctx, vcFmt(L.play_invite, vcBotName()));
+  await sleep(2000);
+  const j = await vc.post('/join', { chat_id: chat.id, link });
+  if (j.status === 'request_sent') {
+    await sleep(2000);
+    try { await bot.telegram.approveChatJoinRequest(chat.id, a.id); }
+    catch (e) { if (!/hide_requester_missing/i.test(e.description || '')) { await ve(chat.id, umm.message_id, vcFmt(L.play_invite_error, e.name || 'Error')); return false; } }
+  } else if (!j.ok) { await ve(chat.id, umm.message_id, vcFmt(L.play_invite_error, j.error)); return false; }
+  vcDel(chat.id, umm.message_id);
+  return true;
+}
+const vcPlaylistText = (L, list) => {
+  let t = '<blockquote expandable>';
+  for (const x of list) { const line = `<b>${x.pos}.</b> ${vcEsc(x.title)}\n`; if (t.length + line.length > 1900) break; t += line; }
+  return vcFmt(L.playlist_queued, list.length) + t + '</blockquote>';
+};
+vcCmd(['play', 'playforce', 'vplay', 'vplayforce'], async (ctx, L) => {
+  const m = ctx.message, chat = ctx.chat, uid = ctx.from.id, cmd = vcCmdName(ctx), args = vcArgs(ctx);
+  if (chat.type !== 'supergroup') { await vr(ctx, L.play_chat_invalid); return bot.telegram.leaveChat(chat.id).catch(() => {}); }
+  const rep = m.reply_to_message, hasMedia = rep && (rep.video || rep.audio || rep.document || rep.voice);
+  if (!rep && (args.length < 1 || (args.length === 1 && args[0] === '-f'))) return vr(ctx, L.play_usage);
+  const cfg = await vcConfig();
+  const force = cmd.endsWith('force') || (args[0] || '').includes('-f'), video = cmd[0] === 'v' && cfg.video_play !== false;
+  const url = vcGetUrl(m), query = args.filter(a => a !== '-f').join(' ');
+
+  if (vcAdminPlay.has(chat.id) || force) {
+    if (!(await vcGetAdmins(chat.id)).has(uid) && !(await vcIsAuth(chat.id, uid)) && !vcSudo.has(uid)) return vr(ctx, L.play_admin);
+  }
+  const st = await vc.get('/state/' + chat.id);
+  if (!st.ok) return vr(ctx, vcApiErr(L, st.error));
+  if (!st.active && !(await vcAssistantReady(ctx, L, st.assistant))) return;
+  if (vcCmdDel.has(chat.id)) ctx.deleteMessage().catch(() => {});
+
+  const sent = await vr(ctx, L.play_searching), user = vcMention(ctx.from);
+  const r = await vc.post('/play', { chat_id: chat.id, user, query, url, reply_message_id: hasMedia ? rep.message_id : null, video, force, status_message_id: sent.message_id }, 600000);
+  if (!r.ok) { if (r.error !== 'cancelled') await ve(chat.id, sent.message_id, vcApiErr(L, r.error, r)); return; }
+
+  if (vcLogger && VC_LOGGER && chat.id !== VC_LOGGER) {
+    const link = chat.username ? `https://t.me/${chat.username}/${sent.message_id}` : `https://t.me/c/${String(chat.id).replace(/^-100/, '')}/${sent.message_id}`;
+    vcLog(vcFmt(L.play_log, vcBotName(), chat.id, vcEsc(chat.title), uid, user, link, vcEsc(r.track.title), r.track.duration));
+  }
+  if (r.action === 'queued') {
+    vcQueued.set(`${chat.id}:${r.track.id}`, sent.message_id);
+    await ve(chat.id, sent.message_id, vcFmt(L.play_queued, r.position, r.track.url, vcEsc(r.track.title), r.track.duration, user), kbQueued(chat.id, r.track.id, L.play_now));
+  }
+  if (r.playlist?.length) await vcSay(chat.id, vcPlaylistText(L, r.playlist));
+}, { group: true, play: true });
+
+// ---------- playback controls ----------
+const vcSimple = (names, path, ok) => vcCmd(names, async (ctx, L) => {
+  if (!(await vcCanManage(ctx, L))) return;
+  const r = await vc.post(path, { chat_id: ctx.chat.id });
+  if (!r.ok) return vr(ctx, vcApiErr(L, r.error));
+  return ok(ctx, L, r);
+}, { group: true });
+vcSimple('pause', '/pause', (ctx, L) => vr(ctx, vcFmt(L.play_paused, vcMention(ctx.from)), kbControls(ctx.chat.id)));
+vcSimple('resume', '/resume', (ctx, L) => vr(ctx, vcFmt(L.play_resumed, vcMention(ctx.from)), kbControls(ctx.chat.id)));
+vcSimple(['skip', 'next'], '/skip', (ctx, L) => vr(ctx, vcFmt(L.play_skipped, vcMention(ctx.from))));
+vcCmd(['end', 'stop'], async (ctx, L) => {
+  if (!(await vcCanManage(ctx, L)) || vcArgs(ctx).length) return;
+  const r = await vc.post('/stop', { chat_id: ctx.chat.id });
+  return vr(ctx, r.ok ? vcFmt(L.play_stopped, vcMention(ctx.from)) : L.not_playing);
+}, { group: true });
+
+vcCmd(['seek', 'seekback'], async (ctx, L) => {
+  if (!(await vcCanManage(ctx, L))) return;
+  const cmd = vcCmdName(ctx), usage = () => vr(ctx, vcFmt(L.play_seek_usage, cmd)), a = vcArgs(ctx)[0];
+  if (!a || !/^-?\d+$/.test(a)) return usage();
+  if (Number(a) < 10) return vr(ctx, L.play_seek_min);
+  const sent = await vr(ctx, L.play_seeking), back = cmd === 'seekback';
+  const r = await vc.post('/seek', { chat_id: ctx.chat.id, seconds: Number(a), back });
+  const text = r.ok ? vcFmt(L.play_seeked, back ? L.backward : L.forward, r.start_from, vcMention(ctx.from)) : r.error === 'no_duration' ? L.play_seek_no_dur : vcApiErr(L, r.error);
+  await ve(ctx.chat.id, sent.message_id, text);
+}, { group: true });
+
+vcCmd('loop', async (ctx, L) => {
+  if (!(await vcCanManage(ctx, L))) return;
+  const cur = await vc.post('/loop', { chat_id: ctx.chat.id });
+  if (!cur.ok) return vr(ctx, L.not_playing);
+  const a = vcArgs(ctx)[0];
+  if (!a) return vr(ctx, cur.count ? vcFmt(L.loop_count, cur.count) : L.loop_usage);
+  const off = ['off', 'disable'].includes(a.toLowerCase());
+  if (!/^\d+$/.test(a) && !off) return vr(ctx, L.loop_usage);
+  let n = off ? 0 : Number(a); n = n < 1 ? 0 : Math.min(n, 10);
+  await vc.post('/loop', { chat_id: ctx.chat.id, count: n });
+  return vr(ctx, n === 0 ? L.loop_off : vcFmt(L.loop_set, n));
+}, { group: true });
+
+vcCmd(['queue', 'playing'], async (ctx, L) => {
+  const chat = ctx.chat.id, q = await vc.get('/queue/' + chat);
+  if (!q.active || !q.items?.length) return vr(ctx, L.not_playing);
+  const reply = await vr(ctx, L.queue_fetching), cur = q.items[0], rest = q.items.slice(1), cfg = await vcConfig();
+  let text = vcFmt(L.queue_curr, cur.url, vcEsc(cur.title.slice(0, 50)), cur.duration, cur.user);
+  if (rest.length) {
+    text += '<blockquote expandable>';
+    rest.slice(0, 14).forEach((t, i) => { text += vcFmt(L.queue_item, i + 2, vcEsc(t.title), t.duration); });
+    text += '</blockquote>';
+  }
+  const keyboard = kbQueue(chat, q.playing ? L.playing : L.paused, q.playing);
+  let photo = null;
+  if (cfg.thumb_gen) { photo = VC_DEFAULT_THUMB; if (cur.kind === 'yt') { const r = await vc.get('/thumb/' + cur.id).catch(() => null); if (r?.buf) photo = { source: r.buf }; } }
+  if (photo) { try { return await bot.telegram.editMessageMedia(chat, reply.message_id, undefined, { type: 'photo', media: photo, caption: text, parse_mode: 'HTML' }, keyboard); } catch (e) { log(`vc queue media: ${e.description || e.message}`); } }
+  await ve(chat, reply.message_id, text, keyboard);
+}, { group: true });
+
+// ---------- auth / admin cache / language ----------
+vcCmd(['auth', 'unauth'], async (ctx, L) => {
+  if (!(await vcAdminOnly(ctx, L))) return;
+  const u = await vcExtractUser(ctx);
+  if (!u) return vr(ctx, L.user_not_found);
+  const chat = ctx.chat.id;
+  await vcIsAuth(chat, u.id);   // loads the cache
+  if (vcCmdName(ctx) === 'auth') {
+    if (await vcIsAdmin(chat, u.id)) return vr(ctx, L.auth_is_admin);
+    vcAuth.get(chat).add(u.id); await vcAuthC.updateOne({ _id: chat }, { $addToSet: { user_ids: u.id } }, { upsert: true });
+    return vr(ctx, vcFmt(L.auth_added, u.mention));
+  }
+  vcAuth.get(chat).delete(u.id); await vcAuthC.updateOne({ _id: chat }, { $pull: { user_ids: u.id } });
+  return vr(ctx, vcFmt(L.auth_removed, u.mention));
+}, { group: true });
+vcCmd('authlist', async (ctx, L) => {
+  if (!(await vcAdminOnly(ctx, L))) return;
+  await vcIsAuth(ctx.chat.id, 0);
+  const list = [...vcAuth.get(ctx.chat.id)];
+  if (!list.length) return vr(ctx, L.auth_empty);
+  return vr(ctx, vcFmt(L.auth_list, vcEsc(ctx.chat.title)) + list.map((u, i) => `\n${i + 1}. <a href="tg://user?id=${u}">${u}</a>`).join(''));
+}, { group: true });
+const vcRel = new Map();
+vcCmd(['admincache', 'reload'], async (ctx, L) => {
+  if ((vcRel.get(ctx.from.id) || 0) > Date.now()) return vr(ctx, L.admin_cache_wait);
+  vcRel.set(ctx.from.id, Date.now() + 600000);
+  const sent = await vr(ctx, L.admin_cache_reloading);
+  await vcGetAdmins(ctx.chat.id, true);
+  await ve(ctx.chat.id, sent.message_id, L.admin_cache_reloaded);
+}, { group: true });
+vcCmd(['lang', 'language'], async (ctx, L) => vr(ctx, L.lang_choose, kbLang(vcLangMap.get(ctx.chat.id) || VC_LANG_DEFAULT)));
+
+// ---------- sudo / owner ----------
+vcCmd(['addsudo', 'delsudo', 'rmsudo'], async (ctx, L) => {
+  const u = await vcExtractUser(ctx);
+  if (!u) return vr(ctx, L.user_not_found);
+  if (vcCmdName(ctx) === 'addsudo') {
+    if (vcSudo.has(u.id)) return vr(ctx, vcFmt(L.sudo_already, u.mention));
+    vcSudo.add(u.id); await vcCacheC.updateOne({ _id: 'sudoers' }, { $addToSet: { user_ids: u.id } }, { upsert: true });
+    return vr(ctx, vcFmt(L.sudo_added, u.mention));
+  }
+  if (!vcSudo.has(u.id) || u.id === VC_OWNER) return vr(ctx, vcFmt(L.sudo_not, u.mention));
+  vcSudo.delete(u.id); await vcCacheC.updateOne({ _id: 'sudoers' }, { $pull: { user_ids: u.id } });
+  return vr(ctx, vcFmt(L.sudo_removed, u.mention));
+}, { owner: true });
+vcCmd(['listsudo', 'sudolist'], async (ctx, L) => {
+  const sent = await vr(ctx, L.sudo_fetching), others = [...vcSudo].filter(x => x !== VC_OWNER);
+  let txt = vcFmt(L.sudo_owner, await vcUserMention(VC_OWNER));
+  if (others.length) txt += L.sudo_users;
+  for (const id of others) txt += `\n- ${await vcUserMention(id)}`;
+  await ve(ctx.chat.id, sent.message_id, txt);
+}, { allowBl: true });
+
+vcCmd(['blacklist', 'unblacklist', 'whitelist'], async (ctx, L) => {
+  const cmd = vcCmdName(ctx), a = vcArgs(ctx)[0];
+  if (!a) return vr(ctx, vcFmt(L.bl_usage, cmd));
+  let id;
+  try { id = a.startsWith('@') ? (await bot.telegram.getChat(a)).id : Number(a); if (!Number.isInteger(id)) throw 0; } catch { return vr(ctx, L.bl_invalid); }
+  const has = vcBlChats.has(id) || vcBlUsers.has(id);
+  if (cmd === 'blacklist') { if (has) return vr(ctx, L.bl_already); await vcSetBl(id, true); return vr(ctx, L.bl_added); }
+  if (!has) return vr(ctx, L.bl_not);
+  await vcSetBl(id, false); return vr(ctx, L.bl_removed);
+}, { sudo: true });
+
+vcCmd(['ac', 'activevc'], async (ctx, L) => {
+  const act = (await vc.get('/active')).active || [];
+  if (!act.length) return vr(ctx, L.vc_empty);
+  if (vcCmdName(ctx) === 'ac') return vr(ctx, vcFmt(L.vc_count, act.length));
+  const sent = await vr(ctx, L.vc_fetching);
+  const text = act.map((x, i) => `\n${i + 1}. <code>${x.chat_id}</code>\n    ➜ ${vcEsc((x.title || '').slice(0, 25))}`).join('');
+  if (text.length < 4000) return ve(ctx.chat.id, sent.message_id, L.vc_list + text);
+  vcDel(ctx.chat.id, sent.message_id);
+  return ctx.replyWithDocument({ source: Buffer.from(text.replace(/<[^>]+>/g, '')), filename: 'activevc.txt' }, { caption: L.vc_list, ...vcH });
+}, { sudo: true });
+
+vcCmd('broadcast', async (ctx, L) => {
+  const m = ctx.message, rep = m.reply_to_message, words = (m.text || '').split(/\s+/);
+  if (!rep) return vr(ctx, L.gcast_usage);
+  if (vcBroadcasting) return vr(ctx, L.gcast_active);
+  const sent = await vr(ctx, L.gcast_start), groups = words.includes('-nochat') ? [] : [...vcChats], users = words.includes('-user') ? [...vcUsers] : [], gset = new Set(groups);
+  vcBroadcasting = true;
+  if (VC_LOGGER) {
+    await bot.telegram.forwardMessage(VC_LOGGER, rep.chat.id, rep.message_id).catch(() => {});
+    const lm = await vcSay(VC_LOGGER, vcFmt(L.gcast_log, ctx.from.id, vcMention(ctx.from), vcEsc(m.text)));
+    if (lm) bot.telegram.pinChatMessage(VC_LOGGER, lm.message_id, { disable_notification: false }).catch(() => {});
+  }
+  await sleep(5000);
+  let count = 0, ucount = 0, failed = '';
+  for (const chat of [...groups, ...users]) {
+    if (!vcBroadcasting) { vcBroadcasting = false; return ve(ctx.chat.id, sent.message_id, vcFmt(L.gcast_stopped, count, ucount)); }
+    try {
+      if (words.includes('-copy')) await bot.telegram.copyMessage(chat, rep.chat.id, rep.message_id, rep.reply_markup ? { reply_markup: rep.reply_markup } : {});
+      else await bot.telegram.forwardMessage(chat, rep.chat.id, rep.message_id);
+      gset.has(chat) ? count++ : ucount++;
+      await sleep(100);
+    } catch (e) {
+      const wait = e.response?.parameters?.retry_after;
+      if (wait) await sleep((wait + 30) * 1000); else failed += `${chat} - ${e.description || e.message}\n`;
+    }
+  }
+  vcBroadcasting = false;
+  const text = vcFmt(L.gcast_end, count, ucount);
+  if (failed) await ctx.replyWithDocument({ source: Buffer.from(failed), filename: 'errors.txt' }, { caption: text });
+  await ve(ctx.chat.id, sent.message_id, text);
+}, { sudo: true });
+vcCmd(['stop_gcast', 'stop_broadcast'], async (ctx, L) => {
+  if (!vcBroadcasting) return vr(ctx, L.gcast_inactive);
+  vcBroadcasting = false;
+  const lm = await vcSay(VC_LOGGER, vcFmt(L.gcast_stop_log, ctx.from.id, vcMention(ctx.from)));
+  if (lm) bot.telegram.pinChatMessage(VC_LOGGER, lm.message_id, { disable_notification: false }).catch(() => {});
+  return vr(ctx, L.gcast_stop);
+}, { sudo: true });
+
+const VC_AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+vcCmd(['eval', 'exec'], async (ctx, L) => {
+  const code = (ctx.message.text || '').replace(/^\/\w+(@\w+)?\s*/, '');
+  if (!code.trim()) return vr(ctx, L.eval_inp);
+  const out = [], print = (...a) => out.push(a.map(x => typeof x === 'string' ? x : vcUtil.inspect(x, { depth: 3 })).join(' '));
+  let result;
+  try { result = await new VC_AsyncFn('ctx', 'bot', 'vc', 'print', 'send', 'sleep', code)(ctx, bot, vc, print, (t, x) => vr(ctx, t, x), sleep); }
+  catch (e) { result = L.eval_error + (e.stack || e); }
+  if (result !== undefined || !out.length) print(result);
+  const output = out.join('\n').trim(), response = vcFmt(L.eval_out, vcEsc(output));
+  if (response.length > 4096) return ctx.replyWithDocument({ source: Buffer.from(output), filename: `${crypto.randomBytes(4).toString('hex')}.txt` }, { disable_notification: true });
+  return vr(ctx, response);
+}, { owner: true });
+vcCmd('logs', async (ctx, L) => {
+  const sent = await vr(ctx, L.log_fetch), r = await vc.get('/logs').catch(() => null);
+  if (!r?.buf) return ve(ctx.chat.id, sent.message_id, L.log_not_found);
+  vcDel(ctx.chat.id, sent.message_id);
+  return ctx.replyWithDocument({ source: r.buf, filename: 'log.txt' }, { caption: vcFmt(L.log_sent, vcBotName()), ...vcH });
+}, { sudo: true });
+vcCmd('logger', async (ctx, L) => {
+  const a = vcArgs(ctx)[0];
+  if (!['on', 'off'].includes(a)) return vr(ctx, vcFmt(L.logger_usage, vcCmdName(ctx)));
+  vcLogger = a === 'on';
+  await vcCacheC.updateOne({ _id: 'logger' }, { $set: { status: vcLogger } }, { upsert: true });
+  return vr(ctx, vcLogger ? L.logger_on : L.logger_off);
+}, { sudo: true });
+// restarts the music server (clears its cache/downloads) and exits this process: needs a supervisor (Railway / pm2 / docker restart policy) to bring it back
+vcCmd('restart', async (ctx, L) => {
+  const sent = await vr(ctx, L.restarting);
+  vc.post('/restart').catch(() => {});
+  await ve(ctx.chat.id, sent.message_id, L.restarted).catch(() => {});
+  setTimeout(() => process.exit(1), 2000);
+}, { sudo: true });
+
+// ---------- callbacks ----------
+vcAct(/^cancel_dl$/, async (ctx, L, chat, msg) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const r = await vc.post('/cancel', { key: `${chat}:${msg.message_id}` });
+  if (r.ok) return ve(chat, msg.message_id, vcFmt(L.dl_cancel, vcMention(ctx.from)), {}, !!msg.photo);
+  return ctx.answerCbQuery(L.dl_not_found, { show_alert: true }).catch(() => {});
+});
+
+vcAct(/^controls (\w+) (-?\d+)(?: (\S+))?$/, async (ctx, L, _c, msg) => {
+  const [, action, cid, extra] = ctx.match, chat = Number(cid), user = vcMention(ctx.from), qaction = extra === 'q' && action !== 'force';
+  if (!(await vcCan(chat, ctx.from.id))) return vcDeny(ctx, L);
+  const st = await vc.get('/state/' + chat);
+  if (!st.active) { try { return await ctx.answerCbQuery(L.not_playing, { show_alert: true }); } catch { return vcDel(msg.chat.id, msg.message_id); } }
+  if (action === 'status') return ctx.answerCbQuery().catch(() => {});
+  await ctx.answerCbQuery(L.processing, { show_alert: true }).catch(() => {});
+  const warn = text => ctx.answerCbQuery(text, { show_alert: true }).catch(() => {});
+  let status, reply;
+
+  if (action === 'pause') {
+    const r = await vc.post('/pause', { chat_id: chat }); if (!r.ok) return warn(vcApiErr(L, r.error));
+    if (qaction) return bot.telegram.editMessageReplyMarkup(msg.chat.id, msg.message_id, undefined, kbQueue(chat, L.paused, false).reply_markup).catch(() => {});
+    status = L.paused; reply = vcFmt(L.play_paused, user);
+  } else if (action === 'resume') {
+    const r = await vc.post('/resume', { chat_id: chat }); if (!r.ok) return warn(vcApiErr(L, r.error));
+    if (qaction) return bot.telegram.editMessageReplyMarkup(msg.chat.id, msg.message_id, undefined, kbQueue(chat, L.playing, true).reply_markup).catch(() => {});
+    reply = vcFmt(L.play_resumed, user);
+  } else if (action === 'skip') {
+    await vc.post('/skip', { chat_id: chat }); status = L.skipped; reply = vcFmt(L.play_skipped, user);
+  } else if (action === 'force') {
+    const r = await vc.post('/force', { chat_id: chat, track_id: extra }, 120000);
+    if (!r.ok) return ve(msg.chat.id, msg.message_id, vcApiErr(L, r.error), {}, !!msg.photo);
+    return;   // server emits next_downloading / track_started, the event handlers do the messages
+  } else if (action === 'replay') {
+    await vc.post('/replay', { chat_id: chat, user }); status = L.replayed; reply = vcFmt(L.play_replayed, user);
+  } else if (action === 'stop') {
+    await vc.post('/stop', { chat_id: chat }); status = L.stopped; reply = vcFmt(L.play_stopped, user);
+  } else return;
+
+  if (['skip', 'replay', 'stop'].includes(action)) {
+    await vcSay(msg.chat.id, reply);
+    return vcDel(msg.chat.id, msg.message_id);
+  }
+  const cur = vcMsg.get(chat), base = cur && cur.id === msg.message_id ? cur.text : vcEsc(msg.caption || msg.text || '');
+  await ve(msg.chat.id, msg.message_id, `${base}\n\n<blockquote>${reply}</blockquote>`, kbControls(chat, { status: action === 'resume' ? undefined : status }), !!msg.photo);
+});
+
+vcAct(/^help(?: (\w+))?$/, async (ctx, L, chat, msg) => {
+  const a = ctx.match[1];
+  if (!a) return ctx.answerCbQuery(undefined, { url: `https://t.me/${bot.botInfo?.username}?start=help` }).catch(() => {});
+  if (a === 'back') return ve(chat, msg.message_id, L.help_menu, kbHelp(L));
+  if (a === 'close') { await vcDel(chat, msg.message_id); return vcDel(chat, msg.reply_to_message?.message_id); }
+  return ve(chat, msg.message_id, L[`help_${a}`] || L.help_menu, kbHelp(L, true));
+});
+vcAct(/^settings(?: (\w+))?$/, async (ctx, L, chat, msg) => {
+  if (!(await vcAdminOnly(ctx, L))) return;
+  const a = ctx.match[1];
+  if (!a) return ctx.answerCbQuery().catch(() => {});
+  await ctx.answerCbQuery(L.processing, { show_alert: true }).catch(() => {});
+  if (a === 'delete') await vcFlag(chat, 'cmd_delete', vcCmdDel, !vcCmdDel.has(chat));
+  else if (a === 'play') await vcFlag(chat, 'admin_play', vcAdminPlay, !vcAdminPlay.has(chat));
+  await bot.telegram.editMessageReplyMarkup(chat, msg.message_id, undefined, kbSettings(L, vcAdminPlay.has(chat), vcCmdDel.has(chat), vcLangMap.get(chat) || VC_LANG_DEFAULT).reply_markup).catch(() => {});
+});
+vcAct(/^(language|lang_change (\w+))$/, async (ctx, L, chat, msg) => {
+  if (!(await vcAdminOnly(ctx, L))) return;
+  const cur = vcLangMap.get(chat) || VC_LANG_DEFAULT, code = ctx.match[2];
+  if (!code) return ve(chat, msg.message_id, L.lang_choose, kbLang(cur), !!msg.photo);
+  if (!VC_LANGS[code]) return ctx.answerCbQuery().catch(() => {});
+  if (cur === code) return ctx.answerCbQuery(vcFmt(L.lang_same, cur), { show_alert: true }).catch(() => {});
+  await ctx.answerCbQuery(vcFmt(L.lang_change, code), { show_alert: true }).catch(() => {});
+  vcLangMap.set(chat, code); await vcLangC.updateOne({ _id: chat }, { $set: { lang: code } }, { upsert: true });
+  return ve(chat, msg.message_id, vcFmt(VC_LANGS[code].lang_changed, code), {}, !!msg.photo);
+});
+
+// ---------- inline search ----------
+bot.on('inline_query', async ctx => {
+  try {
+    const q = (ctx.inlineQuery.query || '').trim().toLowerCase();
+    if (!q || vcBlUsers.has(ctx.from.id)) return;
+    const r = await vc.get(`/search?q=${encodeURIComponent(q)}&limit=15`);
+    const title = s => s.replace(/\w\S*/g, w => w[0].toUpperCase() + w.slice(1).toLowerCase());
+    const results = (r.results || []).map(v => ({
+      type: 'photo', id: crypto.createHash('md5').update(v.link).digest('hex'), photo_url: v.thumbnail, thumbnail_url: v.thumbnail, title: title(v.title),
+      description: `${v.views} | ${v.duration} | ${v.channel} | ${v.published}`, parse_mode: 'HTML',
+      caption: `<b>Title:</b> <a href='${v.link}'>${vcEsc(title(v.title).slice(0, 250))}</a>\n\n<b>Duration:</b> ${vcEsc(v.duration)}\n<b>Views:</b> <code>${vcEsc(v.views)}</code>\n<b>Channel:</b> <a href='${v.channel_link}'>${vcEsc(v.channel)}</a>\n<b>Published:</b> ${vcEsc(v.published)}\n\n<u><i>Fetched by ${vcEsc(vcBotName())}</i></u>`,
+      ...kbYt(v.link),
+    })).filter(x => x.photo_url);
+    if (results.length) await ctx.answerInlineQuery(results, { cache_time: 5 });
+  } catch (e) { log(`vc inline: ${e.description || e.message}`); }
+});
+
+// ---------- service messages: new members (log the chat / leave non-supergroups) and voice chat start/end (stop the stream) ----------
+bot.on('message', async (ctx, next) => {
+  try {
+    const m = ctx.message;
+    if (m.video_chat_started || m.video_chat_ended) vc.post('/stop', { chat_id: ctx.chat.id }).catch(() => {});
+    if (m.new_chat_members?.some(u => u.id === ctx.botInfo?.id)) {
+      if (ctx.chat.type !== 'supergroup') await bot.telegram.leaveChat(ctx.chat.id).catch(() => {});
+      else { await sleep(3000); if (!vcChats.has(ctx.chat.id)) { await vcLog(vcFmt((await vcLangOf(ctx.chat.id)).log_chat, ctx.chat.id, vcEsc(ctx.chat.title), m.from?.id || 0, m.from ? vcMention(m.from) : 'Anonymous')); await vcAddChat(ctx.chat.id); } }
+    }
+  } catch (e) { vcErr(e); }
+  return next();
+});
+
+async function vcInit(db) {
+  vcChatsC = db.collection('vc_chats'); vcUsersC = db.collection('vc_users'); vcAuthC = db.collection('vc_auth'); vcLangC = db.collection('vc_lang'); vcCacheC = db.collection('vc_cache');
+  for (const c of await vcChatsC.find().toArray()) { vcChats.add(c._id); if (c.cmd_delete) vcCmdDel.add(c._id); if (c.admin_play) vcAdminPlay.add(c._id); }
+  for (const u of await vcUsersC.find().toArray()) vcUsers.add(u._id);
+  for (const l of await vcLangC.find().toArray()) vcLangMap.set(l._id, l.lang);
+  for (const id of (await vcCacheC.findOne({ _id: 'sudoers' }))?.user_ids || []) vcSudo.add(id);
+  for (const id of (await vcCacheC.findOne({ _id: 'bl_users' }))?.user_ids || []) vcBlUsers.add(id);
+  for (const id of (await vcCacheC.findOne({ _id: 'bl_chats' }))?.chat_ids || []) vcBlChats.add(id);
+  vcLogger = !!(await vcCacheC.findOne({ _id: 'logger' }))?.status;
+  if (!VC_URL) return console.warn('[vc] VC_API_URL is not set, music commands will answer that the music server is unreachable');
+  vcPoll();
+  setInterval(() => vcTimer().catch(() => {}), 7000);
+  log(`vc music ready: server=${VC_URL} owner=${VC_OWNER} chats=${vcChats.size} users=${vcUsers.size} sudo=${vcSudo.size} langs=${Object.keys(VC_LANGS).join(',')}`);
+}
+// ---------- end of VC music ----------
+
 // Inline bots (e.g. @music bots) first post a "loading" message and later swap in the real audio with editMessageMedia.
 // Telegram delivers that swap as an `edited_message` update, not a `message`, so both are handled by the same function.
 async function onAudioMsg(ctx, m, next, edited = false) {
@@ -2030,6 +2932,7 @@ bot.catch((err, ctx) => console.error(`[${new Date().toISOString()}] [bot] unhan
       if (r.modifiedCount) log(`url migration: ${f} -> ${r.modifiedCount} updated`);
     }
   } catch (e) { console.warn(`[${new Date().toISOString()}] [audio] url migration failed:`, e.message); }
+  await vcInit(db);   // VC music (AviaxMusic port)
   startApi({ songs, users, queues });
   log(`staging dir ${STAGE_DIR} batch=${BATCH_SIZE} max_age=${BATCH_MAX_AGE_MS / 60000}min`);
   setInterval(() => maybeFlush().catch(e => console.error(`[${new Date().toISOString()}] [audio] flush error:`, e.message)), 30000);
