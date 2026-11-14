@@ -1929,7 +1929,7 @@ const VC_SUPPORT_CHANNEL = process.env.SUPPORT_CHANNEL || 'https://t.me/fallenx'
 const VC_SOURCE = process.env.SOURCE_URL || 'https://github.com/CyberPixelPro/AviaxMusic';
 const VC_START_IMG = process.env.START_IMG || 'https://files.catbox.moe/zvziwk.jpg';
 const VC_PING_IMG = process.env.PING_IMG || 'https://files.catbox.moe/haagg2.png';
-const VC_DEFAULT_THUMB = process.env.DEFAULT_THUMB || 'https://te.legra.ph/file/3e40a408286d4eda24191.jpg';
+const VC_DEFAULT_THUMB = process.env.DEFAULT_THUMB || 'https://files.catbox.moe/ft6sen.jpeg';
 const VC_LANG_DEFAULT = process.env.LANG_CODE || 'en';
 const VC_BOOT = Date.now();
 
