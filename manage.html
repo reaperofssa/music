@@ -2,7 +2,23 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<style>html{touch-action:pan-x pan-y}</style>
+<script>/* no zooming: iOS pinch gestures, multi-finger touchmove, double-tap, ctrl+wheel and ctrl +/-/0 */
+(function(){var o={passive:false},p=function(e){e.preventDefault()};
+['gesturestart','gesturechange','gestureend'].forEach(function(t){document.addEventListener(t,p,o)});
+document.addEventListener('touchmove',function(e){if(e.touches.length>1)e.preventDefault()},o);
+var lt=0;document.addEventListener('touchend',function(e){var n=Date.now();if(n-lt<300&&e.touches.length===0&&!(e.target.closest&&e.target.closest('input,textarea,select')))e.preventDefault();lt=n},o);
+addEventListener('wheel',function(e){if(e.ctrlKey)e.preventDefault()},o);
+addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&['+','=','-','_','0'].indexOf(e.key)>-1)e.preventDefault()});})();</script>
+<script>/* closing the keyboard: tap anywhere outside a field, or press Return */
+(function(){
+  function typing(el){if(!el||!el.tagName)return false;if(el.tagName==='TEXTAREA')return true;if(el.tagName!=='INPUT')return false;return ['checkbox','radio','range','color','file','button','submit','reset','image','hidden'].indexOf((el.type||'').toLowerCase())<0;}
+  document.addEventListener('focusin',function(e){if(typing(e.target)&&!e.target.getAttribute('enterkeyhint')&&(e.target.type||'')!=='search')e.target.setAttribute('enterkeyhint','done');});
+  document.addEventListener('keydown',function(e){var t=e.target;if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&typing(t)){e.preventDefault();t.blur();}});
+  document.addEventListener('touchstart',function(e){var a=document.activeElement;if(typing(a)&&e.target!==a&&!(e.target.closest&&e.target.closest('input,textarea,label')))a.blur();},{passive:true});
+})();
+</script>
 <meta name="theme-color" content="#000000">
 <title>Manage · @playlists</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
