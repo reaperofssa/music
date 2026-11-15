@@ -283,10 +283,41 @@ const THEME_ENUM = {
   coverFx: ['none', 'shadow', 'glow', 'spin'],
   enter: ['rise', 'fade', 'zoom', 'slide', 'none'],
   clickFx: ['none', 'ripple', 'sparkle', 'hearts', 'notes'],
+  // ---- appearance v3 ----
+  headFont: ['same', 'system', 'serif', 'mono', 'rounded', 'display', 'condensed', 'handwritten', 'elegant', 'tech'],
+  titleWeight: ['light', 'normal', 'bold', 'black'],
+  titleCase: ['none', 'upper', 'lower', 'caps'],
+  contentWidth: ['narrow', 'normal', 'wide', 'full'],
+  spacing: ['tight', 'normal', 'airy'],
+  capLayout: ['grid', 'list'],
+  capSize: ['small', 'normal', 'large'],
+  capShape: ['square', 'soft', 'round'],
+  capAlign: ['left', 'center'],
+  capHover: ['lift', 'none', 'grow', 'glow'],
+  rowStyle: ['plain', 'cards', 'outlined'],
+  rowDivider: ['none', 'line', 'dotted'],
+  rowActive: ['tint', 'bar', 'glow', 'underline'],
+  thumbShape: ['auto', 'square', 'soft', 'round'],
+  eqStyle: ['bars', 'thick', 'dots', 'pulse'],
+  playShape: ['auto', 'circle', 'squircle', 'pill'],
+  seekStyle: ['thin', 'thick', 'hairline', 'glow'],
+  seekThumb: ['hover', 'always', 'hidden'],
+  npBg: ['blur', 'solid', 'accent'],
+  pageFilter: ['none', 'warm', 'cool', 'vivid', 'mono', 'sepia', 'vintage', 'dreamy'],
+  scrollbar: ['default', 'thin', 'accent', 'hidden'],
+  heroStyle: ['plain', 'card', 'gradient', 'art'],
+  avatarRing: ['none', 'accent', 'double', 'glow'],
+  coverBorder: ['none', 'thin', 'accent', 'frame'],
+  bioStyle: ['plain', 'italic', 'quote', 'pill'],
+  statsStyle: ['pill', 'plain', 'outline'],
 };
-const THEME_NUM = { gradAngle: [0, 360], effectSpeed: [0.3, 2.5], bgBlur: [0, 24], bgDim: [0, 85], patternOpacity: [0, 60], effectSize: [0.5, 2], effectOpacity: [20, 100], fontScale: [85, 125], glowAmt: [0, 100] };
-const THEME_BOOL = ['artColor', 'heroGlow', 'showPlays', 'showStats', 'rowStripes', 'fxPlayOnly'];
-const THEME_HEX = ['bg', 'accent', 'bg2', 'bg3', 'accent2', 'textColor', 'effectColor'];
+const THEME_NUM = { gradAngle: [0, 360], effectSpeed: [0.3, 2.5], bgBlur: [0, 24], bgDim: [0, 85], patternOpacity: [0, 60], effectSize: [0.5, 2], effectOpacity: [20, 100], fontScale: [85, 125], glowAmt: [0, 100],
+  nameSize: [70, 140], titleSpacing: [-5, 12], thumbSize: [24, 64], rowGap: [0, 12], avatarSize: [20, 64], coverSize: [96, 300], cardBorder: [0, 4],
+  playerOpacity: [30, 100], playerBlur: [0, 40], filterAmt: [0, 100], vignette: [0, 80], overlayAmt: [0, 40], bgAnimSpeed: [0.3, 3] };
+const THEME_BOOL = ['artColor', 'heroGlow', 'showPlays', 'showStats', 'rowStripes', 'fxPlayOnly',
+  'titleItalic', 'showNumbers', 'showAlbum', 'showListHeader', 'showPlayerCover', 'npGlow', 'cursorGlow', 'selectAccent', 'showBrand', 'showKind', 'showCover'];
+const THEME_HEX = ['bg', 'accent', 'bg2', 'bg3', 'accent2', 'textColor', 'effectColor', 'mutedColor', 'lineColor', 'cardColor', 'cardBorderColor', 'overlayColor', 'playColor'];
+const THEME_TEXT = { brandText: 24, nameEmoji: 8, footerText: 80 };   // short free text shown on the page (always rendered with textContent)
 // whitelist everything: the page puts these straight into CSS variables / attributes
 function cleanTheme(i, prev = {}) {
   const o = {};
@@ -296,6 +327,11 @@ function cleanTheme(i, prev = {}) {
   for (const [k, [lo, hi]] of Object.entries(THEME_NUM)) { const n = Number(i[k]); if (Number.isFinite(n)) o[k] = Math.min(hi, Math.max(lo, n)); }
   for (const k of THEME_BOOL) if (typeof i[k] === 'boolean') o[k] = i[k];
   if (typeof i.bio === 'string') { const b = i.bio.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140); if (b) o.bio = b; }
+  for (const [k, max] of Object.entries(THEME_TEXT)) {
+    if (typeof i[k] !== 'string') continue;
+    const t = Array.from(i[k].replace(/[\u0000-\u001f\u007f<>]+/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, max).join('');
+    if (t) o[k] = t;
+  }
   if (prev.avatar) o.avatar = prev.avatar;          // images are only ever changed through the upload endpoints
   if (prev.bgImage) o.bgImage = prev.bgImage;
   return o;
