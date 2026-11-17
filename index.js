@@ -2134,6 +2134,17 @@ Object.assign(VC_EN, {
   vc_down: '⚠️ The music server is unreachable, try again in a moment.',
   no_assistant: '⚠️ No assistant account is configured on the music server.',
   vc_error: '⚠️ Something went wrong on the music server.',
+  vc_on: '🎙 Joined the video chat. Messages starting with <code>-</code> will be read out loud. I leave after {0} min without one.',
+  vc_on_nomsg: '⚠️ In-call messages are turned off in this video chat. An admin needs to enable them in the video chat settings.',
+  vc_off: 'Left the video chat.',
+  vc_idle: 'No <code>-</code> messages for {0} minutes, I left the video chat.',
+  vc_busy: 'Music is playing in this chat, stop it first.',
+  allow_added: 'Allowed {0} to use /vc.',
+  allow_removed: 'Removed {0} from the /vc allowed list.',
+  allow_already: '{0} is already allowed.',
+  allow_not: '{0} is not on the allowed list.',
+  allow_list: '<u><b>Allowed for /vc:</b></u>\n',
+  allow_empty: 'Nobody besides you is allowed.',
 });
 const VC_LANG_NAMES = { ar: 'العربية', de: 'Deutsch', en: 'English', es: 'Español', fr: 'Français', hi: 'हिन्दी', ja: '日本語', my: 'မြန်မာဘာသာ', pa: 'ਪੰਜਾਬੀ', pt: 'Português', ru: 'Русский', tr: 'Türkçe', zh: '中文' };
 const VC_LANGS = { en: VC_EN };
@@ -2308,7 +2319,7 @@ const vcApiErr = (L, code, x = {}) => ({
   no_file: vcFmt(L.error_no_file, VC_SUPPORT_CHAT), no_call: L.error_no_call, no_audio: L.error_no_audio, tg_server: L.error_tg_server, rtmp: L.error_rtmp,
   not_found: vcFmt(L.play_not_found, VC_SUPPORT_CHAT), usage: L.play_usage, duration_limit: vcFmt(L.play_duration_limit, x.limit), queue_full: vcFmt(L.play_queue_full, x.limit),
   playlist_error: L.playlist_error, dl_limit: L.dl_limit, dl_active: L.dl_active, not_playing: L.not_playing, already_paused: L.play_already_paused, not_paused: L.play_not_paused,
-  no_assistant: L.no_assistant, expired: L.play_expired,
+  no_assistant: L.no_assistant, expired: L.play_expired, vc_busy: L.vc_busy,
 }[code] || `${L.vc_error}\n<code>${vcEsc(code)}</code>`);
 
 async function vcExtractUser(ctx) {
@@ -2394,7 +2405,13 @@ async function vcOnEvent(e) {
       }
       break;
     }
+    case 'vc_left': {
+      vcTtsChats.delete(chat);
+      if (e.reason === 'idle') await vcSay(chat, vcFmt(L.vc_idle, e.idle_min));
+      break;
+    }
     case 'stopped': {
+      vcTtsChats.delete(chat);
       vcMsg.delete(chat);
       for (const k of [...vcQueued.keys()]) if (k.startsWith(chat + ':')) vcQueued.delete(k);
       break;
@@ -2535,6 +2552,53 @@ vcCmd(['play', 'playforce', 'vplay', 'vplayforce'], async (ctx, L) => {
   }
   if (r.playlist?.length) await vcSay(chat.id, vcPlaylistText(L, r.playlist));
 }, { group: true, play: true });
+
+// ---------- /vc: read "-" in-call messages out loud, /allow ----------
+// Only OWNER_ID (VC_OWNER) and users added with /allow can use /vc, everybody else is silently ignored.
+const vcAllowed = new Set(), vcTtsChats = new Set(), vcNamed = new Set();
+const vcAllowOk = uid => uid === VC_OWNER || vcAllowed.has(uid);
+const vcRow = u => ({ id: u.id, first_name: u.first_name || u.title || '', last_name: u.last_name || '', username: u.username || '' });
+const vcPushName = u => {   // the music server caches id -> "First Last" so it can announce who wrote a message
+  const key = `${u.id}:${u.first_name}:${u.last_name}`;
+  if (vcNamed.has(key)) return;
+  vcNamed.add(key); if (vcNamed.size > 5000) vcNamed.delete(vcNamed.values().next().value);
+  vc.post('/vc/users', { users: [vcRow(u)] }).catch(() => {});
+};
+vcCmd('allow', async (ctx, L) => {
+  const u = await vcExtractUser(ctx);
+  if (!u) {
+    const list = [...vcAllowed];
+    return vr(ctx, list.length ? L.allow_list + (await Promise.all(list.map(vcUserMention))).join('\n') : L.allow_empty);
+  }
+  if (u.id === VC_OWNER || vcAllowed.has(u.id)) return vr(ctx, vcFmt(L.allow_already, u.mention));
+  vcAllowed.add(u.id); await vcCacheC.updateOne({ _id: 'vc_allowed' }, { $addToSet: { user_ids: u.id } }, { upsert: true });
+  return vr(ctx, vcFmt(L.allow_added, u.mention));
+}, { owner: true });
+vcCmd('unallow', async (ctx, L) => {
+  const u = await vcExtractUser(ctx);
+  if (!u) return;
+  if (!vcAllowed.has(u.id)) return vr(ctx, vcFmt(L.allow_not, u.mention));
+  vcAllowed.delete(u.id); await vcCacheC.updateOne({ _id: 'vc_allowed' }, { $pull: { user_ids: u.id } });
+  return vr(ctx, vcFmt(L.allow_removed, u.mention));
+}, { owner: true });
+vcCmd('vc', async (ctx, L) => {
+  const chat = ctx.chat;
+  if (!vcAllowOk(ctx.from.id) || chat.type !== 'supergroup') return;
+  if (/^(off|stop|leave)$/i.test(vcArgs(ctx)[0] || '')) {
+    const r = await vc.post('/vc/stop', { chat_id: chat.id });
+    vcTtsChats.delete(chat.id);
+    return vr(ctx, r.ok ? L.vc_off : vcApiErr(L, r.error));
+  }
+  const st = await vc.get('/state/' + chat.id);
+  if (!st.ok) return vr(ctx, vcApiErr(L, st.error));
+  if (!(await vcAssistantReady(ctx, L, st.assistant))) return;
+  if (vcCmdDel.has(chat.id)) ctx.deleteMessage().catch(() => {});
+  const admins = (await bot.telegram.getChatAdministrators(chat.id).catch(() => [])).filter(a => !a.user.is_bot).map(a => vcRow(a.user));
+  const r = await vc.post('/vc/start', { chat_id: chat.id, users: [...admins, vcRow(ctx.from)] }, 60000);
+  if (!r.ok) return vr(ctx, vcApiErr(L, r.error, r));
+  vcTtsChats.add(chat.id);
+  await vr(ctx, vcFmt(L.vc_on, r.idle_min) + (r.messages_enabled === false ? '\n' + L.vc_on_nomsg : ''));
+}, { group: true });
 
 // ---------- playback controls ----------
 const vcSimple = (names, path, ok) => vcCmd(names, async (ctx, L) => {
@@ -2834,6 +2898,7 @@ bot.on('inline_query', async ctx => {
 bot.on('message', async (ctx, next) => {
   try {
     const m = ctx.message;
+    if (m.from && !m.from.is_bot && vcTtsChats.has(ctx.chat.id)) vcPushName(m.from);
     if (m.video_chat_started || m.video_chat_ended) vc.post('/stop', { chat_id: ctx.chat.id }).catch(() => {});
     if (m.new_chat_members?.some(u => u.id === ctx.botInfo?.id)) {
       if (ctx.chat.type !== 'supergroup') await bot.telegram.leaveChat(ctx.chat.id).catch(() => {});
@@ -2851,6 +2916,7 @@ async function vcInit(db) {
   for (const id of (await vcCacheC.findOne({ _id: 'sudoers' }))?.user_ids || []) vcSudo.add(id);
   for (const id of (await vcCacheC.findOne({ _id: 'bl_users' }))?.user_ids || []) vcBlUsers.add(id);
   for (const id of (await vcCacheC.findOne({ _id: 'bl_chats' }))?.chat_ids || []) vcBlChats.add(id);
+  for (const id of (await vcCacheC.findOne({ _id: 'vc_allowed' }))?.user_ids || []) vcAllowed.add(id);
   vcLogger = !!(await vcCacheC.findOne({ _id: 'logger' }))?.status;
   if (!VC_URL) return console.warn('[vc] VC_API_URL is not set, music commands will answer that the music server is unreachable');
   vcPoll();
