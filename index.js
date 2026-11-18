@@ -2134,7 +2134,7 @@ Object.assign(VC_EN, {
   vc_down: '⚠️ The music server is unreachable, try again in a moment.',
   no_assistant: '⚠️ No assistant account is configured on the music server.',
   vc_error: '⚠️ Something went wrong on the music server.',
-  vc_on: '🎙 Joined the video chat. Messages starting with <code>-</code> will be read out loud. I leave after {0} min without one.',
+  vc_on: 'Done.',
   vc_on_nomsg: '⚠️ In-call messages are turned off in this video chat. An admin needs to enable them in the video chat settings.',
   vc_off: 'Left the video chat.',
   vc_idle: 'No <code>-</code> messages for {0} minutes, I left the video chat.',
